@@ -232,6 +232,8 @@ export class AgentEngine {
     const traces: Trace[] = [];
     session.messages.push({ role: 'user', content: input.message }); session.history.push({ role: 'user', content: input.message });
     let reply = '';
+    const operational = /^\s*(?:por favor[,;:]?\s*)?(?:procesa|lista|consulta|lee|extrae|valida|registra|genera|muestra|revisa)\b/i.test(input.message);
+    let guidedRetry = false;
     try {
       if (session.pending || input.confirmation) reply = await this.confirm(session, input, traces);
       else if (!this.options.adapter.configured) reply = 'Falta configurar un proveedor LLM. La demo determinista funciona sin modelo; el chat no simula un LLM.';
@@ -243,6 +245,14 @@ export class AgentEngine {
             if (response.diagnostics?.doneReason === 'length') {
               session.messages.push({ role: 'user', content: 'La salida anterior alcanzó el límite de tokens. Continúa usando herramientas desde el último resultado confirmado; no repitas registros ni vuelvas a narrar el contrato completo.' });
               continue;
+            }
+            if (operational && traces.length === 0) {
+              if (!guidedRetry) {
+                guidedRetry = true;
+                session.messages.push({ role: 'user', content: 'La petición anterior solicita una operación real. Todavía no has llamado ninguna herramienta. Ejecuta ahora la primera herramienta correspondiente a esa petición; un plan escrito no ejecuta acciones. Mantén las validaciones y la confirmación humana obligatorias. Si no puedes ejecutar, dilo sin afirmar resultados.' });
+                continue;
+              }
+              reply = 'El modelo respondió con texto pero no ejecutó ninguna herramienta. No se ha procesado esta solicitud. Puede pedir una operación concreta, como listar los mensajes pendientes.'; break;
             }
             reply = response.content || 'El modelo no devolvió texto ni llamadas de herramienta.'; break;
           }

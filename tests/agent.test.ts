@@ -221,7 +221,26 @@ test('§8: compacta solo contexto del modelo, mantiene incertidumbres y continú
   await isolated(async directory => {
     const adapter = new FakeAdapter(index => ({ content: index === 0 ? 'Truncado' : 'Continuado', toolCalls: [], usage: { inputTokens: 10, outputTokens: 10 }, diagnostics: { doneReason: index === 0 ? 'length' : 'stop', outputLimit: 2048, contextTokens: 8192 } }));
     const engine = new AgentEngine({ directory, adapter, tools: {}, prompt: 'Prueba', limits: {iterations: 2} });
-    const result = await engine.chat({message: 'Procesa'}); assert.equal(result.reply, 'Continuado'); assert.equal(adapter.calls, 2);
+    const result = await engine.chat({message: 'Explica el flujo'}); assert.equal(result.reply, 'Continuado'); assert.equal(adapter.calls, 2);
     assert.ok((await readFile(path.join(directory, 'out', 'log.jsonl'), 'utf8')).includes('length'));
+  });
+});
+
+
+test('CA1: petición operacional con plan recibe un solo reintento; explicación no lo fuerza', async () => {
+  await isolated(async directory => {
+    const { tools } = fakeTools();
+    const adapter = new FakeAdapter(index => index === 1 ? {content: '', toolCalls: [call('contratos_leer_buzon')]} : {content: index === 0 ? 'Comenzaré consultando el buzón' : 'Buzón consultado', toolCalls: []});
+    const engine = new AgentEngine({directory,adapter,tools,prompt:'Prueba'});
+    const result = await engine.chat({message:'Procesa el buzón de contratos con fecha de hoy 2026-09-03.'});
+    assert.equal(adapter.calls,3); assert.equal(result.toolCalls.length,1); assert.equal(result.toolCalls[0]?.name,'contratos_leer_buzon');
+    const plain = new FakeAdapter(() => ({content:'Procederé a listar',toolCalls:[]}));
+    const plainEngine = new AgentEngine({directory,adapter:plain,tools,prompt:'Prueba'});
+    const failed = await plainEngine.chat({message:'Lista mensajes pendientes'});
+    assert.equal(plain.calls,2); assert.equal(failed.toolCalls.length,0); assert.ok(failed.reply.includes('no ejecutó ninguna herramienta'));
+    const explanation = new FakeAdapter(() => ({content:'El buzón almacena mensajes simulados.',toolCalls:[]}));
+    const explainEngine = new AgentEngine({directory,adapter:explanation,tools,prompt:'Prueba'});
+    const explained = await explainEngine.chat({message:'¿Cómo funciona la lectura del buzón?'});
+    assert.equal(explanation.calls,1); assert.equal(explained.toolCalls.length,0); assert.ok(explained.reply.includes('simulados'));
   });
 });

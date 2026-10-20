@@ -22,7 +22,7 @@ npm test
 npm run demo
 ```
 
-Typecheck y build aprobados. Última suite completa: **41 pruebas, 0 fallidas**: 5 HU-1, 15 HU-2, 10 núcleo/demo y 11 backend. Incluye clasificación, otrosí, confianza/revisión, confirmación humana entre turnos, límites, timeout, idempotencia, errores de escritura, CSV, alertas, API y conservación de originales. Las pruebas del ciclo usan un proveedor fake explícito; no son una prueba del lote completo con Ollama.
+Typecheck y build aprobados. Última suite completa: **42 pruebas, 0 fallidas**: 5 HU-1, 15 HU-2, 10 núcleo/demo y 12 backend. Incluye clasificación, otrosí, confianza/revisión, confirmación humana entre turnos, límites, timeout, idempotencia, errores de escritura, CSV, alertas, API y conservación de originales. Las pruebas del ciclo usan un proveedor fake explícito; no son una prueba del lote completo con Ollama.
 
 La demo usa herramientas sin modelo con hoy=2026-09-03 y limpia únicamente out/ al comienzo. Procesa msg-001/002 como nuevos, msg-003 como actualización, msg-004 duplicado, msg-005 rechazado y msg-006 nuevo pendiente. Verificado: 10 filas antes y 11 después; otrosí cambia a PEN 520000 y fin 2027-11-01; historial contiene cuatro acciones contractuales. Repetición produce iguales resultados salvo timestamps.
 
@@ -61,6 +61,8 @@ Prompt en agent/prompt.md, conocimiento en src/knowledge/registro-contratos.md, 
 El último ensayo real de lote en copia aislada duró 54.396 s y siguió siendo **parcial**: se observaron registros de msg-001/002/006, este último mediante una confirmación humana **simulada** de prueba; no quedó verificado el registro del otrosí msg-003. Se crearon alertas, pero el resumen final se detuvo por presupuesto. No equivale al resultado completo de la demo ni demuestra las 11 filas esperadas mediante el chat LLM. Hubo truncamiento con contexto de 8192: dos respuestas reportaron 8006 tokens de entrada +186 de salida y 8040+152, con fin por longitud. Son observaciones de una ejecución, no benchmark ni una tasa de éxito general.
 
 Para defensa local, trabajar por etapas o mensajes concretos y comprobar las acciones de herramienta; usar la demo sin LLM para verificar el núcleo completo. El presupuesto se reconcilia con usage positivo de Ollama; conserva reserva conservadora cuando falta usage o hay timeout. El límite de salida actual del código es 2048, pero ampliarlo no prueba por sí solo que el contexto permita el lote completo.
+Corrección posterior: ante una solicitud operativa respondida solo con texto, el ciclo realiza como máximo un reintento guiado para ejecutar herramientas; si vuelve a faltar la acción, devuelve un error explícito. El reintento se verificó con proveedor fake. Un ensayo real nuevo, aislado y solo de lectura, tardó 6.421 s: contratos_leer_buzon({}) devolvió seis mensajes, reconoció msg-005 como rechazado y terminó en dos llamadas al modelo con 5069/40000 tokens; no registró contratos ni ejercitó el reintento real porque llamó la herramienta a la primera. Evidencia: out/ollama-lista-evidencia-ISHVd8/out/log.jsonl. Esta lectura no acredita el lote completo. La app que el usuario mantiene abierta sigue ejecutando la versión anterior: no se reinició porque perdería sesiones en memoria. Los cambios nuevos aún no se han subido.
+
 ## Entrega y límites
 
 URL pública: **no disponible**. Se prepara defensa local con Ollama; PRD §9.3 admite esa alternativa con penalización de -10 puntos. No se ha publicado ni enviado una entrega.
