@@ -191,13 +191,15 @@ export async function generateAlerts(ctx: Context, today: string) {
   const end = new Date(`${today}T00:00:00Z`);
   end.setUTCDate(end.getUTCDate() + 60);
   const limit = end.toISOString().slice(0, 10);
+  const cutoff = '2026-05-30';
   const vencen = rows.filter(row => row.fecha_fin >= today && row.fecha_fin <= limit);
   const polizas_pendientes = rows.filter(row => row.requiere_poliza === 'true' && row.estado_poliza !== 'vigente');
-  const registrados_desde_corte = rows.filter(row => row.fecha_registro >= '2026-05-30');
-  const section = (title: string, items: Row[]): string => `## ${title}\n\n` + (items.length ? items.map(row => `- ${row.id_contrato} — ${row.cliente.replace(/[\r\n]/g, ' ')}; fin ${row.fecha_fin}; póliza ${row.estado_poliza}`).join('\n') : 'Sin casos.') + '\n\n';
+  const registrados_desde_corte = rows.filter(row => row.fecha_registro >= cutoff);
+  const daysUntil = (row: Row): number => Math.round((Date.parse(`${row.fecha_fin}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000);
+  const section = (title: string, items: Row[], includeDays = false): string => `## ${title}\n\n` + (items.length ? items.map(row => `- ${row.id_contrato} - ${row.cliente.replace(/[\r\n]/g, ' ')}; fin ${row.fecha_fin}${includeDays ? `; a ${daysUntil(row)} días` : ''}; póliza ${row.estado_poliza}`).join('\n') : 'Sin casos.') + '\n\n';
   const report = `# Alertas de contratos\n\nFecha de referencia: ${today}. Horizonte inclusivo: ${today} a ${limit}; no incluye ya vencidos.\n\n`
-    + section('Vencen en ≤ 60 días', vencen) + section('Pólizas pendientes o no vigentes', polizas_pendientes)
-    + section('Registrados desde el corte 2026-05-30', registrados_desde_corte);
+    + section('Vencen entre 0 y 60 días (inclusive)', vencen, true) + section('Pólizas pendientes o no vigentes', polizas_pendientes)
+    + section(`Registrados desde el corte ${cutoff}`, registrados_desde_corte);
   await commitFiles(ctx, { 'alertas.md': report });
-  return { ruta: 'out/alertas.md', vencen, polizas_pendientes, registrados_desde_corte };
+  return { ruta: 'out/alertas.md', hoy: today, hasta: limit, dias_horizonte: 60, fecha_corte: cutoff, reporte: report, vencen, polizas_pendientes, registrados_desde_corte };
 }

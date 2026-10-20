@@ -249,11 +249,11 @@ test('CA1: petición operacional con plan recibe un solo reintento; explicación
 test('CA1: buzón vacío no omite alertas explícitas; un solo reintento o pendiente honesto', async () => {
   await isolated(async directory => {
     const tools = fakeTools().tools;
-    tools.contratos_alertas = {description: 'Alertas',args:{hoy:z.string()},async execute(){return JSON.stringify({ok:true,data:{ruta:'out/alertas.md',vencimientos:[]}});}};
+    tools.contratos_alertas = {description: 'Alertas',args:{hoy:z.string()},async execute(){return JSON.stringify({ok:true,data:{ruta:'out/alertas.md',hoy:'2026-09-03',hasta:'2026-11-02',dias_horizonte:60,fecha_corte:'2026-05-30',reporte:'# Reporte real',vencimientos:[]}});}};
     const request = 'Procesa el buzón con hoy 2026-09-03 y termina con el reporte de alertas.';
     const adapter = new FakeAdapter(index => ({content:index===0?'Consultaré buzón':index===2?'Procederé a generar reporte':'Resultado real',toolCalls:index===1?[call('contratos_leer_buzon')]:index===3?[call('contratos_alertas',{hoy:'2026-09-03'})]:[]}));
     const engine = new AgentEngine({directory,adapter,tools,prompt:'Prueba'});
-    const result = await engine.chat({message:request}); assert.equal(adapter.calls,5);
+    const result = await engine.chat({message:request}); assert.equal(adapter.calls,4);
     assert.deepEqual(result.toolCalls.map(trace=>trace.name),['contratos_leer_buzon','contratos_alertas']);
     const omission = new FakeAdapter(index=>({content:'Generaré las alertas',toolCalls:index===1?[call('contratos_leer_buzon')]:[]}));
     const omitted = await new AgentEngine({directory,adapter:omission,tools,prompt:'Prueba'}).chat({message:request});
@@ -265,8 +265,46 @@ test('CA1: buzón vacío no omite alertas explícitas; un solo reintento o pendi
     tools.contratos_alertas = {description:'Alertas fallidas',args:{hoy:z.string()},async execute(){return JSON.stringify({ok:false,error:'No se pudo escribir el reporte'});}};
     const failure = new FakeAdapter(index=>({content:'Generaré reporte',toolCalls:index===0?[call('contratos_leer_buzon'),call('contratos_alertas',{hoy:'2026-09-03'})]:[]}));
     const failed = await new AgentEngine({directory,adapter:failure,tools,prompt:'Prueba'}).chat({message:request});
-    assert.equal(failure.calls,2); assert.ok(failed.reply.includes('herramienta falló')); assert.ok(failed.reply.includes('reporte sigue pendiente'));
+    assert.equal(failure.calls,1); assert.ok(failed.reply.includes('herramienta falló')); assert.ok(failed.reply.includes('reporte sigue pendiente'));
     const explanation = new FakeAdapter(()=>({content:'Las alertas usan una fecha de referencia',toolCalls:[]}));
     await new AgentEngine({directory,adapter:explanation,tools,prompt:'Prueba'}).chat({message:'¿Cómo genera el sistema las alertas?'}); assert.equal(explanation.calls,1);
+  });
+});
+
+
+test('CA4: alertas presenta reporte exacto validado y nunca consulta resumen contradictorio del modelo', async () => {
+  await isolated(async directory => {
+    const report = '# Alertas 2026-09-03\nHorizonte: 60 días, hasta 2026-11-02\nCT-2026-004 | 2026-10-15 | dentro del horizonte';
+    const data = {reporte:report,ruta:'out/alertas.md',hoy:'2026-09-03',hasta:'2026-11-02',dias_horizonte:60,fecha_corte:'2026-05-30'};
+    const tools: ToolRegistry = {contratos_alertas:{description:'Alertas',args:{hoy:z.string()},async execute(){return JSON.stringify({ok:true,data});}}};
+    const adapter = new FakeAdapter(index=>index===0?{content:'Generando',toolCalls:[call('contratos_alertas',{hoy:'2026-09-03'})]}:{content:'CT-2026-004 está fuera del horizonte',toolCalls:[]});
+    const result = await new AgentEngine({directory,adapter,tools,prompt:'Prueba'}).chat({message:'Genera el reporte de alertas con hoy 2026-09-03'});
+    assert.equal(adapter.calls,1); assert.equal(result.reply,report+'\n\nArchivo: out/alertas.md\n\nReporte generado. Esto no certifica que todo el buzón esté procesado; puede haber mensajes pendientes.'); assert.ok(result.reply.includes('CT-2026-004 | 2026-10-15 | dentro'));
+    tools.contratos_alertas = {description:'Inválido',args:{hoy:z.string()},async execute(){return JSON.stringify({ok:true,data:{...data,hasta:'fecha inventada'}});}};
+    const invalid = new FakeAdapter(()=>({content:'',toolCalls:[call('contratos_alertas',{hoy:'2026-09-03'})]}));
+    const failed = await new AgentEngine({directory,adapter:invalid,tools,prompt:'Prueba'}).chat({message:'Genera alertas hoy2026-09-03'});
+    assert.equal(invalid.calls,1); assert.ok(failed.reply.includes('incompleto o inválido')); assert.ok(!failed.reply.includes(report));
+  });
+});
+
+
+test('CA3/CA4: pending tiene prioridad ante alertas en misma respuesta y turno posterior; reporte no certifica lote', async () => {
+  await isolated(async directory => {
+    const {tools,state} = fakeTools(); let alertsCalls = 0;
+    const data = {reporte:'# Reporte real',ruta:'out/alertas.md',hoy:'2026-09-03',hasta:'2026-11-02',dias_horizonte:60,fecha_corte:'2026-05-30'};
+    tools.contratos_alertas = {description:'Alertas',args:{hoy:z.string()},async execute(){alertsCalls++;return JSON.stringify({ok:true,data});}};
+    const adapter = new FakeAdapter(index=>({content:'',toolCalls:index===0?[call('contratos_extraer',{mensaje_id:'msg-006'})]:[call('contratos_validar',{mensaje_id:'msg-006'}),call('contratos_alertas',{hoy:'2026-09-03'})]}));
+    const engine = new AgentEngine({directory,adapter,tools,prompt:'Prueba'});
+    const pending = await engine.chat({message:'Procesa el buzón y genera alertas hoy 2026-09-03'});
+    assert.equal(pending.needsConfirmation,true); assert.equal(alertsCalls,0); assert.equal(state.writes,0);
+    assert.equal(pending.toolCalls.some(trace=>trace.name==='contratos_alertas'),false);
+    const again = await engine.chat({sessionId:pending.sessionId,message:'Genera las alertas con hoy 2026-09-03'});
+    assert.equal(again.needsConfirmation,true); assert.equal(alertsCalls,0); assert.equal(state.writes,0); assert.equal(adapter.calls,2);
+    assert.ok(again.reply.includes('confirmación humana')); assert.ok(!again.reply.includes('Reporte generado'));
+    tools.contratos_leer_buzon = {description:'Leer',args:{},async execute(){return JSON.stringify({ok:true,data:{mensajes:[{id:'msg-001',tiene_contrato:true}],errores:[]}});}};
+    const reader = new FakeAdapter(()=>({content:'Lote completo',toolCalls:[call('contratos_leer_buzon'),call('contratos_alertas',{hoy:'2026-09-03'})]}));
+    const report = await new AgentEngine({directory,adapter:reader,tools,prompt:'Prueba'}).chat({message:'Lista mensajes y genera reporte de alertas hoy 2026-09-03'});
+    assert.ok(report.reply.startsWith(data.reporte)); assert.ok(report.reply.includes('no certifica que todo el buzón esté procesado'));
+    assert.ok(!report.reply.includes('Lote completo')); assert.equal(state.writes,0); assert.equal(alertsCalls,1); assert.equal(reader.calls,1);
   });
 });

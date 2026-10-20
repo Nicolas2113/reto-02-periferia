@@ -225,3 +225,18 @@ test('RN2/HU4: coincidencia NIT+objeto evita fila nueva; ID ausente se genera AU
     assert.equal((await readMaster(ctx)).length, 9);
   });
 });
+
+test('HU5 fidelidad: 2026-10-15 está a 42 días y el reporte devuelto coincide con el archivo', async () => {
+  await isolated(async ctx => {
+    const before = await hashes(path.join(ctx.directory, 'fixtures'));
+    const data = await call<{ hoy: string; hasta: string; dias_horizonte: number; fecha_corte: string; reporte: string; vencen: { id_contrato: string; fecha_fin: string }[] }>(alertas, { hoy: '2026-09-03' }, ctx);
+    assert.equal(data.hoy, '2026-09-03');
+    assert.equal(data.hasta, '2026-11-02');
+    assert.equal(data.dias_horizonte, 60);
+    assert.equal(data.fecha_corte, '2026-05-30');
+    assert.ok(data.vencen.some(row => row.id_contrato === 'CT-2026-004' && row.fecha_fin === '2026-10-15'));
+    assert.match(data.reporte, /CT-2026-004[^\n]*fin 2026-10-15; a 42 días/);
+    assert.equal(data.reporte, await readFile(path.join(ctx.directory, 'out', 'alertas.md'), 'utf8'));
+    assert.deepEqual(await hashes(path.join(ctx.directory, 'fixtures')), before);
+  });
+});

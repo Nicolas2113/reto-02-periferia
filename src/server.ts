@@ -39,6 +39,11 @@ const responseSchema = z.object({ content: z.string(), toolCalls: z.array(z.obje
 const envelopeSchema = z.discriminatedUnion('ok', [
   z.object({ ok: z.literal(true), data: z.unknown() }), z.object({ ok: z.literal(false), error: z.string() }),
 ]);
+const alertReportSchema = z.object({
+  reporte: z.string().min(1), ruta: z.literal('out/alertas.md'),
+  hoy: z.string().date(), hasta: z.string().date(),
+  dias_horizonte: z.literal(60), fecha_corte: z.string().date(),
+});
 const object = (value: unknown): JsonObject | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined;
 const clone = (value: JsonObject): JsonObject => structuredClone(value);
 
@@ -283,8 +288,20 @@ export class AgentEngine {
             const result = await this.perform(session, call, traces);
             session.messages.push({ role: 'tool', content: compactToolResult(result), toolCallId: call.id });
             if (session.pending) break;
+            if (call.name === 'contratos_alertas') {
+              const envelope = envelopeSchema.safeParse(result);
+              if (!envelope.success || !envelope.data.ok) {
+                reply = 'La herramienta falló al generar alertas: ' + (envelope.success && !envelope.data.ok ? envelope.data.error : 'respuesta inválida') + '. El reporte sigue pendiente.';
+              } else {
+                const report = alertReportSchema.safeParse(envelope.data.data);
+                reply = report.success ? report.data.reporte + '\n\nArchivo: ' + report.data.ruta + '\n\nReporte generado. Esto no certifica que todo el buzón esté procesado; puede haber mensajes pendientes.'
+                  : 'La herramienta devolvió un reporte de alertas incompleto o inválido. No se presenta un resumen; revise la traza y vuelva a solicitarlo.';
+              }
+              break;
+            }
           }
           if (session.pending) { reply = this.question(session); break; }
+          if (reply) break;
         }
         if (!reply) reply = 'Alcancé el límite de iteraciones. Revise las herramientas ejecutadas; quedan acciones pendientes que puede solicitar en otro turno.';
       }
