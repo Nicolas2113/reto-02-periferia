@@ -1,6 +1,7 @@
 import { appendFile, lstat, mkdir, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
+import { extraerTexto, type Contrato } from '../extraccion.js';
 
 interface Context { directory: string; sessionId: string }
 interface Message {
@@ -109,7 +110,7 @@ function readable(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-async function log(ctx: Context, ok: boolean, resumen: string): Promise<void> {
+async function log(ctx: Context, ok: boolean, resumen: string, herramienta = 'contratos_leer_buzon', mensaje_id: string | null = null): Promise<void> {
   const output = path.join(ctx.directory, 'out');
   for (const candidate of [output, path.join(output, 'log.jsonl')]) {
     try {
@@ -118,8 +119,8 @@ async function log(ctx: Context, ok: boolean, resumen: string): Promise<void> {
   }
   await mkdir(output, { recursive: true });
   await appendFile(path.join(output, 'log.jsonl'), JSON.stringify({
-    ts: new Date().toISOString(), herramienta: 'contratos_leer_buzon',
-    mensaje_id: null, ok, resumen,
+    ts: new Date().toISOString(), herramienta,
+    mensaje_id, ok, resumen,
   }) + '\n', 'utf8');
 }
 
@@ -142,6 +143,61 @@ export const leer_buzon = {
       await log(ctx, result.ok, result.ok
         ? `${result.data.mensajes.length} pendientes; ${result.data.errores.length} errores de lectura`
         : result.error);
+    } catch {
+      return JSON.stringify({ ok: false, error: 'No se pudo guardar out/log.jsonl; verifica el acceso al directorio de salida' });
+    }
+    return JSON.stringify(result);
+  },
+};
+
+const extractionArgs = {
+  mensaje_id: z.string().regex(/^msg-[a-zA-Z0-9][a-zA-Z0-9_-]*$/, 'ID de mensaje no válido')
+    .describe('ID del mensaje del buzón, por ejemplo msg-001; nunca una ruta de archivo'),
+};
+const extractionInput = z.object(extractionArgs).strict();
+
+async function contractText(ctx: Context, id: string): Promise<string> {
+  const directory = path.join(ctx.directory, 'fixtures', 'reto-02', 'buzon', id);
+  for (const candidate of [directory, path.join(directory, 'correo.json')]) {
+    if ((await lstat(candidate)).isSymbolicLink()) throw new Error('Mensaje enlazado no permitido');
+  }
+  const parsed = mailSchema.safeParse(await json(path.join(directory, 'correo.json')));
+  if (!parsed.success) throw new Error('correo.json inválido: revisar ID, remitente, fecha y adjuntos');
+  if (parsed.data.id !== id) throw new Error('ID del correo no coincide con el directorio');
+  const texts: string[] = [];
+  let empty = false;
+  for (const attachment of parsed.data.adjuntos) {
+    if (!attachment.toLowerCase().endsWith('.txt')) continue;
+    const file = path.join(directory, attachment);
+    if ((await lstat(file)).isSymbolicLink()) throw new Error('Adjunto enlazado no permitido');
+    const text = await readFile(file, 'utf8');
+    if (!text.trim()) { empty = true; continue; }
+    const title = normalizedTitle(text);
+    if (/^contrato\b/.test(title) || /^otrosi\b.*\bcontrato\b/.test(title)) texts.push(text);
+  }
+  if (texts.length > 1) throw new Error('Varios contratos en el mensaje: seleccionar el adjunto antes de extraer');
+  if (!texts[0]) throw new Error(empty ? 'Texto contractual vacío' : 'Documento no contractual: no hay contrato u otrosí TXT identificable');
+  return texts[0];
+}
+
+export const extraer = {
+  description: 'Extrae datos y evidencia con confianza heurística de un contrato u otrosí TXT del buzón, sin completar ausencias desde el maestro ni registrar datos.',
+  args: extractionArgs,
+  async execute(args: Record<string, unknown>, ctx: Context): Promise<string> {
+    let result: { ok: true; data: Contrato } | { ok: false; error: string };
+    let messageId: string | null = null;
+    try {
+      const input = extractionInput.parse(args);
+      messageId = input.mensaje_id;
+      result = { ok: true, data: extraerTexto(await contractText(ctx, messageId)) };
+    } catch (error) {
+      result = { ok: false, error: error instanceof z.ZodError
+        ? 'Datos de extracción no válidos: verifica mensaje_id y esquema contractual'
+        : readable(error, 'No se pudo extraer el contrato') };
+    }
+    try {
+      await log(ctx, result.ok, result.ok ? 'Contrato extraído; ausencias conservadas sin registrar' : result.error,
+        'contratos_extraer', messageId);
     } catch {
       return JSON.stringify({ ok: false, error: 'No se pudo guardar out/log.jsonl; verifica el acceso al directorio de salida' });
     }

@@ -1,39 +1,48 @@
 # HU-2 — Extraer datos del contrato
 
-Estado: especificación previa a implementación; todavía sin código ni pruebas nuevas de HU-2. Fuente única de requisitos: PRD.md, HU-2, §6.2 y §7.2; casos §7.4, errores HU-6. HU-1 permanece sin cambios.
+Estado: implementada después de la spec inicial, con pruebas. Fuente única: PRD.md HU-2, §6.2, §7.2; casos §7.4, errores HU-6 y bitácora RN7. No incluye validación/clasificación de HU-3 ni registro de HU-4.
 
-## Alcance y contrato
+## Contrato implementado
 
-Implementar después de revisar esta spec: export extraer en src/tools/contratos.ts, nombre contratos_extraer. Objeto description/args/execute según §6.2; args.mensaje_id será un esquema zod descrito con .describe(). Recibe { mensaje_id } y contexto { directory, sessionId }; valida ID y resuelve rutas desde ctx.directory, sin rutas absolutas codificadas ni escapes del buzón.
+src/tools/contratos.ts exporta extraer (contratos_extraer), con description, args.mensaje_id validado con zod y .describe(), y execute(args, ctx). Helper mínimo y esquema: src/extraccion.ts. Rutas desde ctx.directory, sin ID usado como ruta arbitraria ni rutas absolutas codificadas. No hay LLM ni lectura del maestro/comerciales.
 
-execute devuelve string JSON: { ok: true, data: Contrato } o { ok: false, error }, nunca lanza. Mensaje/adjunto inexistente, texto vacío, formato inválido o moneda contractual no admitida producen error legible. Una cotización sin contrato no se convierte en Contrato: devuelve error de documento no contractual; la clasificación definitiva pertenece a HU-3.
+Retorno string JSON { ok: true, data: Contrato } o { ok: false, error }; execute captura los errores. Adjunto/mensaje inexistente, texto vacío, moneda contractual desconocida, monto mal formado, fecha inválida, cotización y rutas inseguras se informan sin lanzar. Si hay más de un contrato TXT se pide seleccionar adjunto, sin elegir uno silenciosamente.
 
-Propuesta de salida para revisar: propiedades del esquema §7.2 con tipos allí definidos, admitiendo null durante extracción, más confianza: { [campo]: número entre 0 y 1 }. Cada campo ausente en el documento permanece null y confianza 0. Incluir valor_indeterminado para representar demanda conforme a §7.2. La forma final de este auxiliar y los metadatos de registro pendientes se discute abajo; no hay implementación implícita.
+Salida: las 16 propiedades de §7.2 con tipos validados y null durante extracción cuando no hay dato; confianza por propiedad, evidencias y advertencias. Auxiliares explícitos, no columnas nuevas del maestro: valor_indeterminado, plazo_meses, poliza_condicional y tipo_documento. También tienen confianza. Ausencias siempre null/0. Comercial, estado de póliza, ruta, fecha de registro y fuente quedan null/0; se resolverán en las fases correspondientes, sin confundirlos con datos contractuales dudosos.
 
-Regex y heurísticas sobre el TXT del adjunto indicado en correo.json, incluido otrosi.txt; no LLM ni consulta al maestro para completar datos. Igual texto/entrada produce iguales valores y confianza. Separadores numéricos, identificador tributario y fechas se normalizan conforme a §7.2 con validación de calendario. No registra contratos, no marca procesados ni modifica fixtures/maestro; bitácora de herramienta según RN7. Los valores finales deberán pasar por contratos_validar en HU-3.
+Solo lee el TXT contractual declarado en correo.json, incluido otrosi.txt; escribe exclusivamente la bitácora out/log.jsonl. No escribe maestro/procesados ni archiva documentos.
 
-## Aceptación prevista desde los fixtures
+## Casos verificados
 
-| Caso | Resultado a comprobar en HU-2 |
+| Caso | Resultado real |
 |---|---|
-| msg-001 | CT-2026-015, cliente Industrias Delta, NIT 890900111, COP 265000000, inicio 2026-08-01, fin 2027-07-31; garantía de cumplimiento identificada. |
-| msg-002 | CT-2026-016, contraparte ecuatoriana y RUC 1790012345001, USD 120000, 2026-08-15 a 2027-08-14; ausencia de cláusula de garantía se distingue de texto ausente. |
-| msg-003 | Otrosí de CT-2026-011: PEN 520000 y fin 2027-11-01. Objeto e inicio no aparecen: null/confianza 0, sin recuperarlos del maestro. No confundir la fecha de suscripción mencionada con inicio contractual. Preservar/combinar campos corresponde a HU-3/HU-4. |
-| msg-004 | Extraer CT-2026-012, COP 210000000 y fechas 2026-05-15 a 2026-11-14. No decidir duplicado: eso corresponde a HU-3. |
-| msg-005 | Cotización: error legible de documento no contractual, sin extraer un supuesto contrato a partir de su importe. |
-| msg-006 | CM-2026-03, demanda: valor 0 y valor_indeterminado true según §7.2, con confianza de valor inferior a 0.8 para la revisión exigida en §7.4. Firma solo indica agosto de 2026: inicio/fin null y confianza 0; conocer doce meses no determina fechas sin día inicial. COP 100000000 es umbral de garantía por orden, no valor contractual. Póliza condicional y moneda requieren criterio explícito, no una afirmación automática. |
+| msg-001 | CT-2026-015, NIT 890900111, CO, COP 265000000, 2026-08-01 a 2027-07-31; póliza de cumplimiento. |
+| msg-002 | CT-2026-016, RUC 1790012345001, EC, USD 120000, 2026-08-15 a 2027-08-14; sin cláusula de garantía en el texto completo. |
+| msg-003 | Otrosí CT-2026-011, PE, PEN 520000, fin 2027-11-01. Objeto e inicio null/0; no usa la fecha de suscripción como inicio ni rellena desde el maestro. |
+| msg-004 | CT-2026-012, COP 210000000, 2026-05-15 a 2026-11-14. Extrae, no clasifica como duplicado. |
+| msg-005 | Error legible de documento no contractual. No convierte la cotización en contrato. |
+| msg-006 | CM-2026-03, valor 0 por demanda, valor_indeterminado true, plazo 12 meses; inicio/fin y moneda null/0. El umbral de garantía COP 100000000 no se usa como valor ni moneda contractual. poliza_condicional true, tipo cumplimiento y requiere_poliza null/0, con advertencia explícita. |
 
-Pruebas futuras: seis casos, rangos de confianza, ausencia null/0, dos extracciones iguales, IDs/rutas inválidos, texto vacío, moneda no admitida y fechas inválidas; conservar hashes de PRD/fixtures. No se agregaron ni ejecutaron estas pruebas en esta fase.
+## Heurística y decisiones conservadoras
 
-## Confianza y decisiones pendientes para revisión
+Confianza es escala ordinal de evidencia, no probabilidad calibrada: 0.9 literal, 0.8 inferencia simple, 0.7 derivación de fecha, 0.5 representación de valor por demanda que requiere revisión, 0 ausencia. Evidencias indica el texto o la regla usada; no son porcentajes de exactitud.
 
-La confianza será una puntuación heurística de evidencia, no probabilidad calibrada ni porcentaje de acierto. Documentar la regla que produce cada banda: literal inequívoco, inferencia, ambigüedad y ausencia. Ausencia es 0; ambigüedad e inferencias dudosas quedan debajo de 0.8; la escala exacta de campos legibles debe fijarse antes de implementar, sin decimales que aparenten precisión estadística.
+- País inferido del domicilio de la contraparte, sin usar la sede colombiana de Periferia. Se quita DV solo al NIT separado por guion; RUC conserva los dígitos entregados, coherente con los fixtures.
+- Sin garantía en un contrato con partes, objeto y cierre de firma se infiere requiere_poliza false (0.8) y tipo vacío. No se aplica esa inferencia a un otrosí ni a texto parcial. Es una heurística del TXT entregado, no una revisión jurídica.
+- Garantía condicional no se traduce en obligación global. En msg-006 se conserva null para aplicabilidad hasta revisión humana. La ausencia de día de firma nunca se suple con fecha del correo ni con una fecha inventada.
+- Si hay inicio completo y plazo sin fin, se calcula inicio + meses - un día (fin inclusivo, confianza 0.7); inicios de día 29–31 se dejan pendientes por ambigüedad de fin de mes. Si no hay inicio, no se calcula fin.
+- Objeto se recorta a máximo 200 caracteres en límite de palabra, avisando y conservando texto completo en evidencias. ID ausente queda null/0; AUTO corresponde a registro posterior.
 
-Pendientes explícitos, no resueltos silenciosamente:
+## Pruebas reales
 
-1. §7.2 mezcla datos contractuales con comercial/estado_poliza/ruta_sharepoint/fecha_registro/fuente. Propuesta: dejarlos null/0 si no están en el texto y resolverlos en validación/registro, sin inventarlos en extracción. Acordar el esquema de intercambio antes de codificar.
-2. Sin cláusula de póliza (msg-002) frente a garantía condicional (msg-006): acordar booleano/tipo y confianza. El PRD exige revisión para msg-006; no convertir condición por orden en obligación incondicional sin confirmación.
-3. Representación de valor_indeterminado (no es columna del CSV), evidencia del plazo en meses y moneda de msg-006: no inferir moneda del valor contractual solo por el umbral de garantía.
-4. Cómputo de plazo y objetos largos: acordar fin inclusivo cuando sí haya inicio completo y tratamiento transparente del límite de 200 caracteres. ID ausente debe quedar sin inventar en HU-2; generación AUTO requiere coordinación con registro.
+npm run check aprobado. npm test: 20 aprobadas, 0 fallidas (15 HU-2 y 5 regresión HU-1), con Node 24.16.0. Pruebas de nuevos COP/USD, otrosí PEN parcial, duplicado sin clasificar, cotización, demanda/condición, determinismo, calendario, moneda, montos, texto vacío, IDs/rutas, adjuntos ausentes, esquema zod y fin derivado. El script enumera ambos archivos de prueba sin depender de expansión de comodines del shell.
 
-Siguiente paso: revisar estas decisiones con Nicolás; después implementar únicamente HU-2 y sus pruebas, conservando HU-1. SOLUCION.md permanece en la raíz y deberá documentar decisiones efectivas y asistencia IA antes de entregar. Esta spec fue preparada con ChatGPT/Codex; no se consultó un LLM desde el proyecto.
+La prueba de independencia elimina maestro/comerciales únicamente de una copia dentro de out/ y obtiene la misma extracción del otrosí. Solo aparece log.jsonl como salida de extracción; se comparan hashes de fixtures y bytes del PRD originales. Los datos mutados son copias de prueba; no se altera el material entregado.
+
+## Límites y siguientes historias
+
+Parser deliberadamente acotado a la familia de TXT entregada: cláusulas por párrafos con encabezados, montos con código de moneda y separadores válidos, fechas ISO o día numérico (también entre paréntesis) y mes español. No OCR/PDF, fechas solo escritas en palabras ni comprensión jurídica general. Fuera de esos patrones conserva ausencias; no afirma cobertura universal.
+
+HU-3 deberá combinar el parche del otrosí con el maestro, resolver comercial y separar campos operativos de campos que requieren revisión. HU-4 deberá exigir datos completos y confirmación humana real antes de registrar; un confirmado true del modelo no la sustituye. Falta acordar aplicabilidad de la póliza condicional y fechas completas de msg-006 con la usuaria. No se han implementado HU-3+, demo, API/chat, LLM ni despliegue.
+
+SOLUCION.md permanece en la raíz y registra decisiones y asistencia reales. ChatGPT/Codex asistió con esta spec, implementación y pruebas; no se consultó un LLM desde la herramienta.
