@@ -1,2 +1,36 @@
-// Interfaz pendiente de definir con el proveedor elegido (PRD 6.1). Sin integración ni llamadas externas.
-export {};
+import { z } from 'zod';
+
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters: z.ZodObject<z.ZodRawShape>;
+}
+export interface ModelToolCall { id: string; name: string; args: Record<string, unknown> }
+export interface ModelMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  toolCalls?: ModelToolCall[];
+  toolCallId?: string;
+}
+export interface ModelResponse {
+  content: string;
+  toolCalls: ModelToolCall[];
+  usage?: { inputTokens: number; outputTokens: number };
+  diagnostics?: { doneReason?: string; contextTokens?: number; outputLimit?: number };
+}
+export interface ModelOptions { signal: AbortSignal; maxOutputTokens: number }
+export interface LlmAdapter {
+  readonly provider: string;
+  readonly model: string;
+  readonly configured: boolean;
+  enviar(messages: ModelMessage[], tools: ToolDefinition[], options: ModelOptions): Promise<ModelResponse>;
+}
+
+export class UnconfiguredAdapter implements LlmAdapter {
+  readonly provider = 'sin_configurar';
+  readonly model = 'sin_configurar';
+  readonly configured = false;
+  async enviar(_messages: ModelMessage[], _tools: ToolDefinition[], _options: ModelOptions): Promise<ModelResponse> {
+    throw new Error('Proveedor LLM no configurado');
+  }
+}

@@ -1,9 +1,11 @@
 import { appendFile, lstat, mkdir, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
-import { extraerTexto, type Contrato } from '../extraccion.js';
+import { contratoSchema, extraerTexto, fechaSchema, type Contrato } from '../extraccion.js';
+import { generateAlerts, registerContract, validateContract } from '../registro.js';
+import { withWriteLock } from '../almacen.js';
 
-interface Context { directory: string; sessionId: string }
+interface Context { directory: string; sessionId: string; hoy?: string }
 interface Message {
   id: string;
   de: string;
@@ -204,3 +206,43 @@ export const extraer = {
     return JSON.stringify(result);
   },
 };
+
+function tool<S extends z.ZodRawShape>(name: string, description: string, args: S,
+  action: (input: z.infer<z.ZodObject<S>>, ctx: Context) => Promise<unknown>, writes = false) {
+  const schema = z.object(args).strict();
+  return {
+    description, args,
+    async execute(input: Record<string, unknown>, ctx: Context): Promise<string> {
+      let result: { ok: true; data: unknown } | { ok: false; error: string };
+      let messageId: string | null = null;
+      try {
+        const parsed = schema.parse(input);
+        if (typeof parsed.mensaje_id === 'string') messageId = parsed.mensaje_id;
+        const data = writes ? await withWriteLock(() => action(parsed, ctx)) : await action(parsed, ctx);
+        result = { ok: true, data };
+      } catch (error) {
+        result = { ok: false, error: error instanceof z.ZodError
+          ? 'Argumentos o datos no válidos: ' + error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')
+          : readable(error, 'No se pudo completar la herramienta') };
+      }
+      try { await log(ctx, result.ok, result.ok ? 'Operación completada' : result.error, name, messageId); }
+      catch { return JSON.stringify({ ok: false, error: 'No se pudo guardar bitácora; revisar out/ antes de reintentar' }); }
+      return JSON.stringify(result);
+    },
+  };
+}
+const contractInput = {
+  mensaje_id: extractionArgs.mensaje_id,
+  contrato: contratoSchema.nullable().describe('Contrato devuelto por extraer o validar; null únicamente para un mensaje sin contrato'),
+};
+export const validar = tool('contratos_validar',
+  'Revalida datos frente al TXT y maestro, clasifica y señala campos dudosos, conservando datos existentes de un otrosí sin registrar.',
+  contractInput, (input, ctx) => validateContract(ctx, input.mensaje_id, input.contrato));
+export const registrar = tool('contratos_registrar',
+  'Revalida y registra un contrato completo, archiva su TXT y conserva historial; los campos dudosos requieren confirmación humana controlada por el backend.',
+  { ...contractInput, confirmado: z.boolean().optional().describe('Solo true tras confirmación humana del siguiente turno; no autoriza datos incompletos ni inválidos') },
+  (input, ctx) => registerContract(ctx, input.mensaje_id, input.contrato, input.confirmado === true), true);
+export const alertas = tool('contratos_alertas',
+  'Genera reporte de contratos que vencen desde hoy hasta 60 días, pólizas no vigentes y altas desde el corte, con fecha explícita.',
+  { hoy: fechaSchema.describe('Fecha de referencia de las alertas YYYY-MM-DD para ejecución determinista') },
+  (input, ctx) => generateAlerts(ctx, input.hoy), true);
