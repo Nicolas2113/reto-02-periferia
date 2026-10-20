@@ -233,7 +233,11 @@ export class AgentEngine {
     session.messages.push({ role: 'user', content: input.message }); session.history.push({ role: 'user', content: input.message });
     let reply = '';
     const operational = /^\s*(?:por favor[,;:]?\s*)?(?:procesa|lista|consulta|lee|extrae|valida|registra|genera|muestra|revisa)\b/i.test(input.message);
+    const positiveAlerts = /\b(?:genera\w*|crea\w*|produce\w*|elabora\w*|termina\w*)\b[^.!?]{0,90}\b(?:reporte|informe)?[^.!?]{0,30}\balertas\b/i.test(input.message);
+    const negativeAlerts = /\b(?:no|sin)\s+(?:(?:gener\w*|cre\w*|produc\w*|elabor\w*)\s+)?(?:(?:el|un)\s+)?(?:(?:reporte|informe)\s+de\s+)?alertas\b/i.test(input.message);
+    const requestedAlerts = operational && positiveAlerts && !negativeAlerts;
     let guidedRetry = false;
+    let alertsRetry = false;
     try {
       if (session.pending || input.confirmation) reply = await this.confirm(session, input, traces);
       else if (!this.options.adapter.configured) reply = 'Falta configurar un proveedor LLM. La demo determinista funciona sin modelo; el chat no simula un LLM.';
@@ -245,6 +249,25 @@ export class AgentEngine {
             if (response.diagnostics?.doneReason === 'length') {
               session.messages.push({ role: 'user', content: 'La salida anterior alcanzó el límite de tokens. Continúa usando herramientas desde el último resultado confirmado; no repitas registros ni vuelvas a narrar el contrato completo.' });
               continue;
+            }
+            const emptyMailbox = traces.some(trace => {
+              if (trace.name !== 'contratos_leer_buzon') return false;
+              const envelope = envelopeSchema.safeParse(trace.result);
+              const data = envelope.success && envelope.data.ok ? object(envelope.data.data) : undefined;
+              return data && Array.isArray(data.mensajes) && data.mensajes.length === 0;
+            });
+            const failedAlerts = traces.find(trace => trace.name === 'contratos_alertas' && object(trace.result)?.ok === false);
+            if (requestedAlerts && failedAlerts) {
+              reply = 'Se intentó generar el reporte de alertas, pero la herramienta falló: ' + String(object(failedAlerts.result)?.error ?? 'error de herramienta') + '. El reporte sigue pendiente.'; break;
+            }
+            const missingAlerts = requestedAlerts && emptyMailbox && !traces.some(trace => trace.name === 'contratos_alertas');
+            if (missingAlerts) {
+              if (!alertsRetry) {
+                alertsRetry = true;
+                session.messages.push({role: 'user', content: 'El buzón consultado está vacío, pero la petición solicita explícitamente el reporte de alertas. Todavía no has llamado contratos_alertas. Ejecuta esa herramienta con la fecha de referencia solicitada, sin registrar contratos. Si falta la fecha, pídela; no afirmes un reporte no ejecutado.'});
+                continue;
+              }
+              reply = 'Se consultó el buzón: no hay mensajes pendientes. No se ejecutó contratos_alertas; el reporte de alertas solicitado sigue pendiente.'; break;
             }
             if (operational && traces.length === 0) {
               if (!guidedRetry) {
