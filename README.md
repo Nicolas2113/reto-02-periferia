@@ -22,7 +22,7 @@ npm test
 npm run demo
 ```
 
-Typecheck y build aprobados. Última suite completa: **37 pruebas, 0 fallidas**: 5 HU-1, 15 HU-2, 10 núcleo/demo y 7 backend. Incluye clasificación, otrosí, confianza/revisión, confirmación humana entre turnos, límites, timeout, idempotencia, errores de escritura, CSV, alertas, API y conservación de originales. Las pruebas del ciclo usan un proveedor fake explícito; no son una prueba del lote completo con Ollama.
+Typecheck y build aprobados. Última suite completa: **41 pruebas, 0 fallidas**: 5 HU-1, 15 HU-2, 10 núcleo/demo y 11 backend. Incluye clasificación, otrosí, confianza/revisión, confirmación humana entre turnos, límites, timeout, idempotencia, errores de escritura, CSV, alertas, API y conservación de originales. Las pruebas del ciclo usan un proveedor fake explícito; no son una prueba del lote completo con Ollama.
 
 La demo usa herramientas sin modelo con hoy=2026-09-03 y limpia únicamente out/ al comienzo. Procesa msg-001/002 como nuevos, msg-003 como actualización, msg-004 duplicado, msg-005 rechazado y msg-006 nuevo pendiente. Verificado: 10 filas antes y 11 después; otrosí cambia a PEN 520000 y fin 2027-11-01; historial contiene cuatro acciones contractuales. Repetición produce iguales resultados salvo timestamps.
 
@@ -41,7 +41,7 @@ La segunda pasada de demo aporta una confirmación humana **simulada**, no infer
 | PORT | 3000 |
 | MAX_ITERATIONS | 25 |
 | MAX_SESSION_TOKENS | 120000 |
-| MAX_OUTPUT_TOKENS | 1024 |
+| MAX_OUTPUT_TOKENS | 2048 |
 | LLM_TIMEOUT_MS | 90000 |
 | MAX_SESSIONS | 50 |
 
@@ -49,15 +49,18 @@ El servidor y el adaptador están restringidos a loopback; no se autorizan model
 
 ## Chat y API
 
-El frontend muestra historial, pensando, llamadas con nombre/argumentos/resultado y revisión pendiente resaltada. Confirmar implica un turno humano posterior y un pendingId vigente; el formulario permite aportar valores concretos. El modelo no puede autorizarse con confirmado:true ni sustituir el contrato obtenido de herramientas. El registro vuelve a validar completitud y tipos.
+El frontend muestra historial, pensando, llamadas con nombre/argumentos/resultado y revisión pendiente resaltada. Confirmar implica un turno humano posterior y un pendingId vigente; el formulario permite aportar valores concretos. La confirmación textual solo acepta la frase exacta confirmo o sí confirmo, con puntuación opcional; cambiar campos exige el formulario ligado al snapshot. El modelo no puede autorizarse con confirmado:true ni sustituir el contrato obtenido de herramientas. El registro vuelve a validar completitud y tipos.
 
 - POST /api/chat: { sessionId?, message, confirmation? }; devuelve sessionId, reply, toolCalls, needsConfirmation y pending.
 - GET /api/sessions/:id: historial, revisión pendiente y presupuesto de la sesión.
 - GET /api/health: disponibilidad del backend, provider, model y configured; sin secretos.
 - GET /: frontend del mismo backend.
 
-Prompt en agent/prompt.md, conocimiento en src/knowledge/registro-contratos.md, ejecución en src/tools/contratos.ts y adaptador desacoplado en src/llm/. Se comprobó /api/tags con qwen3.5:4b y tool calling nativo real: leer_buzon devolvió 0 pendientes tras la demo, y extraer(msg-001) devolvió COP 265000000 y fechas 2026-08-01/2027-07-31, que el modelo reprodujo correctamente. Una llamada tardó 6.538 s y un ciclo de dos llamadas 7.842 s, con 1651 tokens de entrada acumulados y 88 de salida. Son observaciones de una prueba pequeña, no benchmark. Un primer lote real aislado respondió HTTP 200 en 20.457 s con 11 llamadas: leyó seis mensajes, extrajo cinco contratos y validó las clasificaciones esperadas. Se detuvo correctamente ante msg-006, pero no registró los casos limpios porque el modelo acumuló validaciones; por tanto ese ensayo no fue un éxito completo. Se ajustó el prompt para procesar cada mensaje de punta a punta y la repetición real sigue pendiente.
+Prompt en agent/prompt.md, conocimiento en src/knowledge/registro-contratos.md, ejecución en src/tools/contratos.ts y adaptador desacoplado en src/llm/. Se comprobó /api/tags con qwen3.5:4b y tool calling nativo real de leer_buzon y extraer(msg-001), con valor COP 265000000 y fechas correctas.
 
+El último ensayo real de lote en copia aislada duró 54.396 s y siguió siendo **parcial**: se observaron registros de msg-001/002/006, este último mediante una confirmación humana **simulada** de prueba; no quedó verificado el registro del otrosí msg-003. Se crearon alertas, pero el resumen final se detuvo por presupuesto. No equivale al resultado completo de la demo ni demuestra las 11 filas esperadas mediante el chat LLM. Hubo truncamiento con contexto de 8192: dos respuestas reportaron 8006 tokens de entrada +186 de salida y 8040+152, con fin por longitud. Son observaciones de una ejecución, no benchmark ni una tasa de éxito general.
+
+Para defensa local, trabajar por etapas o mensajes concretos y comprobar las acciones de herramienta; usar la demo sin LLM para verificar el núcleo completo. El presupuesto se reconcilia con usage positivo de Ollama; conserva reserva conservadora cuando falta usage o hay timeout. El límite de salida actual del código es 2048, pero ampliarlo no prueba por sí solo que el contexto permita el lote completo.
 ## Entrega y límites
 
 URL pública: **no disponible**. Se prepara defensa local con Ollama; PRD §9.3 admite esa alternativa con penalización de -10 puntos. No se ha publicado ni enviado una entrega.
