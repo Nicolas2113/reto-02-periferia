@@ -1,13 +1,23 @@
 # Registro de Contratos Vigentes — reto 02
 
-Estado: estructura preparada; funcionalidad pendiente. No hay servidor, demo operativa ni proveedor elegido. No se han instalado dependencias.
+Fuente única de requisitos: PRD.md, conservado intacto. TAREAS.md enlaza trabajo y pruebas al PRD; SOLUCION.md registra decisiones y asistencia IA.
 
-La fuente única de requisitos es PRD.md, conservado en la raíz. TAREAS.md contiene la lista breve de trabajo trazable al PRD.
+## Estado comprobado
 
-La estructura sigue PRD 6.5: agent/prompt.md, src/server.ts, src/llm/adapter.ts, src/tools/contratos.ts, src/knowledge/registro-contratos.md, web/, fixtures/, out/, demo.ts, .env.example, package.json, README.md y SOLUCION.md. No se crea un archivo de proveedor hasta elegir uno.
+Solo contratos_leer_buzon (export leer_buzon de src/tools/contratos.ts) está implementado. Lee los fixtures, excluye IDs presentes en out/procesados.json, reconoce contratos/otrosíes TXT y rechaza cotizaciones con motivo. Devuelve JSON serializado, informa errores por correo y registra out/log.jsonl. No marca mensajes procesados ni altera fixtures.
 
-Los fixtures permanecen exactamente en fixtures/reto-02/, sin cambios. out/ está vacío y reservado a datos generados.
+Node 20+ es el runtime. Dependencias de proyecto declaradas y fijadas en package-lock.json; para reproducirlas: npm ci. En PowerShell puede usarse npm.cmd.
 
-Archivos adicionales: tsconfig.json y .gitignore son configuración de proyecto; TAREAS.md registra tareas/pruebas. Los borradores previos domain.ts, storage.ts y SPEC-borrador-no-usar.md están conservados fuera del proyecto, en el directorio temporal reto-02-build. docs/ quedó vacío tras trasladar el borrador; no se eliminó ningún archivo. No existe otra especificación activa en el proyecto.
+Comandos verificados en Windows con Node 24:
 
-Los scripts de package.json son preparación para el siguiente bloque; no implican que exista una aplicación ejecutable. Arranque, variables definitivas, demo y enlace se documentarán cuando estén implementados y verificados.
+- npm run check: TypeScript estricto sin emitir archivos.
+- npm test: compila y ejecuta cinco pruebas de HU-1/errores/inmutabilidad.
+- npm run build: compila en dist/.
+
+Las pruebas usan copias de datos únicamente dentro de out/ y limpian sus propios directorios temporales. node_modules/, dist/ y out/ están excluidos por .gitignore.
+
+## Pendiente
+
+No hay servidor, chat, integración LLM, demo operativa ni enlace de prueba. extraer, validar, registrar y alertas no están implementados. agent/prompt.md, adapter.ts y otros archivos de estructura siguen como marcadores; proveedor y variables definitivas aún sin elegir. No se requieren claves para las pruebas existentes.
+
+La estructura sigue PRD §6.5. Los fixtures conservan fixtures/reto-02/. TAREAS.md, tsconfig.json, tests/ y .gitignore son archivos auxiliares de desarrollo. Los borradores previos domain.ts, storage.ts y SPEC-borrador-no-usar.md están fuera del proyecto, conservados en el directorio temporal reto-02-build. docs/ sigue vacío; el PRD es la única especificación vigente.
