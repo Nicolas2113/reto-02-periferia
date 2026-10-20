@@ -1,0 +1,13 @@
+{
+  "name": "registro-contratos",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "demo": "npm run build && node dist/demo.js",
+    "test": "npm run build && node --test dist/tests/core.test.js"
+  }
+}
