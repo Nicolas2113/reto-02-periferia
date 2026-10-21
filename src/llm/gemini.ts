@@ -1,8 +1,9 @@
+import { DiagnosticError, type DiagnosticCode } from '../diagnostico.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { LlmAdapter, ModelMessage, ModelOptions, ModelResponse, ToolDefinition } from './adapter.js';
 export const freeModels=['gemini-3.8-flash','gemini-3.5-flash-lite'] as const;
-export class GeminiError extends Error {constructor(readonly status:number){super(status===429?'Gemini: cuota agotada; conservar progreso':`Gemini: proveedor no disponible (${status})`);}}
+export class GeminiError extends DiagnosticError {constructor(readonly status:number){const code:DiagnosticCode=([400,401,403,404,429].includes(status)?'GEMINI_HTTP_'+status:status>=500&&status<=599?'GEMINI_HTTP_5XX':'GEMINI_HTTP_OTHER') as DiagnosticCode;super(code,'provider',status);}}
 export function geminiSchema(schema:z.ZodTypeAny):Record<string,unknown>{
   let result:Record<string,unknown>;
   if(schema instanceof z.ZodOptional||schema instanceof z.ZodDefault)result=geminiSchema(schema._def.innerType);
@@ -15,7 +16,7 @@ export function geminiSchema(schema:z.ZodTypeAny):Record<string,unknown>{
   else if(schema instanceof z.ZodNumber)result={type:'NUMBER'};
   else if(schema instanceof z.ZodBoolean)result={type:'BOOLEAN'};
   else if(schema instanceof z.ZodArray)result={type:'ARRAY',items:geminiSchema(schema.element)};
-  else throw new Error('Schema de herramienta no soportado por Gemini');
+  else throw new DiagnosticError('GEMINI_SCHEMA','schema');
   if(schema.description)result.description=schema.description;return result;
 }
 const candidateSchema=z.object({content:z.object({role:z.string(),parts:z.array(z.record(z.unknown()))}).passthrough().optional(),finishReason:z.string().optional()});
@@ -33,7 +34,7 @@ export class GeminiAdapter implements LlmAdapter {
     const contents=messages.filter(message=>message.role!=='system').map(message=>{
       if(message.role==='assistant'&&message.providerContent)return structuredClone(message.providerContent);
       if(message.role==='tool'){
-        const previous=message.toolCallId?calls.get(message.toolCallId):undefined;if(!previous)throw new Error('Resultado Gemini sin llamada conocida');
+        const previous=message.toolCallId?calls.get(message.toolCallId):undefined;if(!previous)throw new DiagnosticError('GEMINI_PROTOCOL','schema');
         let result:unknown;try{result=JSON.parse(message.content) as unknown;}catch{result={texto:message.content};}
         const parts=previous.native?.parts;const native=Array.isArray(parts)?parts.map(part=>z.record(z.unknown()).parse(part)).find(part=>{const fc=functionSchema.safeParse(part.functionCall);return fc.success&&fc.data.name===previous.call.name;}):undefined;
         const fc=native?functionSchema.safeParse(native.functionCall):undefined;
@@ -44,13 +45,13 @@ export class GeminiAdapter implements LlmAdapter {
     const payload={systemInstruction:{parts:[{text:messages.filter(message=>message.role==='system').map(message=>message.content).join('\n\n')}]},contents,
       ...(tools.length?{tools:[{functionDeclarations:tools.map(tool=>({name:tool.name,description:tool.description,parameters:geminiSchema(tool.parameters)}))}]}:{}),
       generationConfig:{temperature:0,maxOutputTokens:options.maxOutputTokens}};
-    let response:Response;try{response=await this.fetcher(`https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent`,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':this.options.apiKey},body:JSON.stringify(payload),signal:options.signal,redirect:'error'});}catch{throw new Error('Gemini: conexión interrumpida; no se confirma una nueva ejecución');}
+    let response:Response;try{response=await this.fetcher(`https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent`,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':this.options.apiKey},body:JSON.stringify(payload),signal:options.signal,redirect:'error'});}catch{throw new DiagnosticError('GEMINI_TRANSPORT','provider');}
     if(!response.ok)throw new GeminiError(response.status);
-    let raw:z.infer<typeof apiSchema>;try{raw=apiSchema.parse(await response.json() as unknown);}catch{throw new Error('Gemini: respuesta inválida');}
-    const first=raw.candidates?.[0];if(raw.promptFeedback?.blockReason||!first?.content||!['STOP','MAX_TOKENS',undefined].includes(first.finishReason))throw new Error('Gemini no devolvió una respuesta utilizable; solicitud bloqueada o incompleta');
+    let raw:z.infer<typeof apiSchema>;try{raw=apiSchema.parse(await response.json() as unknown);}catch{throw new DiagnosticError('GEMINI_RESPONSE_INVALID','response');}
+    const first=raw.candidates?.[0];if(raw.promptFeedback?.blockReason||!first?.content||!['STOP','MAX_TOKENS',undefined].includes(first.finishReason))throw new DiagnosticError('GEMINI_RESPONSE_BLOCKED','response');
     const parts=first.content.parts,usage=raw.usageMetadata;
     return {content:parts.filter(part=>part.thought!==true&&typeof part.text==='string').map(part=>String(part.text)).join(''),providerContent:first.content,
-      toolCalls:parts.filter(part=>part.functionCall!==undefined).map(part=>{const call=functionSchema.parse(part.functionCall);return {id:call.id??randomUUID(),name:call.name,args:call.args};}),
+      toolCalls:parts.filter(part=>part.functionCall!==undefined).map(part=>{const parsed=functionSchema.safeParse(part.functionCall);if(!parsed.success)throw new DiagnosticError('GEMINI_RESPONSE_INVALID','response');const call=parsed.data;return {id:call.id??randomUUID(),name:call.name,args:call.args};}),
       ...(usage?{usage:{inputTokens:usage.promptTokenCount??0,outputTokens:Math.max((usage.candidatesTokenCount??0)+(usage.thoughtsTokenCount??0),(usage.totalTokenCount??0)-(usage.promptTokenCount??0))}}:{}),
       diagnostics:{doneReason:first.finishReason==='MAX_TOKENS'?'length':'stop',outputLimit:options.maxOutputTokens}};
   }

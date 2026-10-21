@@ -1,3 +1,4 @@
+import { classify, reportDiagnostic, type DiagnosticCode, type DiagnosticStage } from './diagnostico.js';
 import { engineStateSchema, type EngineState } from './session-state.js';
 import { randomUUID } from 'node:crypto';
 import { appendFile, lstat, mkdir, readFile } from 'node:fs/promises';
@@ -188,15 +189,18 @@ export class AgentEngine {
     session.spent += reserve;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let stage:DiagnosticStage='model';
     try {
-      const response = responseSchema.parse(await Promise.race([
+      const rawResponse = await Promise.race([
         this.options.adapter.enviar(session.messages, catalog, { signal: controller.signal, maxOutputTokens: this.limits.outputTokens }),
         new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error('timeout')); }, this.limits.timeoutMs); }),
-      ]));
+      ]);
+      stage='response';const response=responseSchema.parse(rawResponse);
       const actual = response.usage ? response.usage.inputTokens + response.usage.outputTokens : 0;
       if (Number.isSafeInteger(actual) && actual > 0) session.spent += actual - reserve;
       // Sin consumo informado, con cero o timeout se conserva la reserva; no se presume costo cero.
       if (session.spent > this.limits.sessionTokens) throw new Error('budget');
+      stage='audit';
       await mkdir(path.join(this.options.directory, 'out'), { recursive: true });
       await appendFile(path.join(this.options.directory, 'out', 'log.jsonl'), JSON.stringify({
         ts: new Date().toISOString(), tipo: 'llm', sessionId: session.id,
@@ -204,7 +208,7 @@ export class AgentEngine {
         usage: response.usage ?? null, diagnostics: response.diagnostics ?? null,
       }) + '\n');
       return response;
-    } finally { if (timer) clearTimeout(timer); }
+    } catch(error){throw classify(error,stage);} finally { if (timer) clearTimeout(timer); }
   }
   private stageAllowed(session: Session, call: ModelToolCall): boolean {
     if(!session.batchActive||!session.batch)return true;
@@ -289,6 +293,7 @@ export class AgentEngine {
     session.busy = true; session.turn++;
     const traces: Trace[] = [];
     session.messages.push({ role: 'user', content: input.message }); session.history.push({ role: 'user', content: input.message });
+    const diagnosticStarted=Date.now();let diagnosticCode:DiagnosticCode|undefined;
     let reply = '';
     const operational = /^\s*(?:por favor[,;:]?\s*)?(?:procesa|lista|consulta|lee|extrae|valida|registra|genera|muestra|revisa)\b/i.test(input.message);
     const positiveAlerts = /\b(?:genera\w*|crea\w*|produce\w*|elabora\w*|termina\w*)\b[^.!?]{0,90}\b(?:reporte|informe)?[^.!?]{0,30}\balertas\b/i.test(input.message);
@@ -390,10 +395,12 @@ export class AgentEngine {
         if (!reply) reply = 'Alcancé el límite de iteraciones. Revise las herramientas ejecutadas; quedan acciones pendientes que puede solicitar en otro turno.';
       }
     } catch (error) {
-      reply = error instanceof Error && error.message === 'timeout' ? 'El modelo tardó demasiado. La sesión se conserva; puede intentar otra vez.'
-        : error instanceof Error && error.message === 'quota' ? 'Cuota temporal o diaria agotada. El progreso se conserva; espere antes de continuar.'
-        : error instanceof Error && error.message === 'budget' ? 'Se alcanzó el presupuesto de esta sesión. Revise los resultados obtenidos.'
+      diagnosticCode=reportDiagnostic(error,{provider:this.options.adapter.provider,model:this.options.adapter.model,started:diagnosticStarted});
+      reply = diagnosticCode === 'MODEL_TIMEOUT' ? 'El modelo tardó demasiado. La sesión se conserva; puede intentar otra vez.'
+        : (diagnosticCode === 'APP_QUOTA'||diagnosticCode === 'GEMINI_HTTP_429') ? 'Cuota temporal o diaria agotada. El progreso se conserva; espere antes de continuar.'
+        : diagnosticCode === 'SESSION_BUDGET' ? 'Se alcanzó el presupuesto de esta sesión. Revise los resultados obtenidos.'
         : 'No se pudo completar el turno del modelo o herramienta. La sesión se conserva; revise la configuración local y vuelva a intentar.';
+      reply+=' [Diagnóstico: '+diagnosticCode+']';
     } finally {
       session.busy=false;
       if(session.batchActive&&session.batch){
@@ -406,7 +413,7 @@ export class AgentEngine {
       session.batchActive=false;
     }
     session.messages.push({ role: 'assistant', content: reply }); session.history.push({ role: 'assistant', content: reply, toolCalls: traces, batch: publicBatch(session.batch) });
-    return { sessionId: session.id, reply, toolCalls: traces, needsConfirmation: Boolean(session.pending), pending: this.publicPending(session), batch: publicBatch(session.batch) };
+    return { ...(diagnosticCode?{diagnosticCode}:{}),sessionId: session.id, reply, toolCalls: traces, needsConfirmation: Boolean(session.pending), pending: this.publicPending(session), batch: publicBatch(session.batch) };
   }
 }
 

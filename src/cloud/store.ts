@@ -1,3 +1,4 @@
+import { DiagnosticError } from '../diagnostico.js';
 import { z } from 'zod';
 import { engineStateSchema } from '../session-state.js';
 export const STATE_TTL=7200,LEASE_MS=150000,MAX_STATE_BYTES=900000;
@@ -5,7 +6,7 @@ export const cloudStateSchema=z.object({version:z.number().int().nonnegative(),e
 export type CloudState=z.infer<typeof cloudStateSchema>;
 export const emptyState=():CloudState=>({version:0,engine:{version:1,sessions:[]},files:{},seenRequests:[],receipts:[]});
 export interface RedisTransport { command(args:(string|number)[]):Promise<unknown> }
-export class StoreError extends Error {constructor(){super('Almacén no disponible; resultado no confirmado. Reintente el mismo requestId.');}}
+export class StoreError extends DiagnosticError {constructor(status?:number){super('PERSISTENCE_FAILED','persistence',status);}}
 export class UpstashRest implements RedisTransport {
   private readonly url:string;private readonly fetcher:typeof fetch;
   constructor(private readonly options:{url:string;token:string;fetcher?:typeof fetch}){
@@ -13,7 +14,7 @@ export class UpstashRest implements RedisTransport {
     this.url=url.toString();this.fetcher=options.fetcher??fetch;
   }
   async command(args:(string|number)[]):Promise<unknown>{
-    try{const response=await this.fetcher(this.url,{method:'POST',headers:{Authorization:'Bearer '+this.options.token,'Content-Type':'application/json'},body:JSON.stringify(args),signal:AbortSignal.timeout(5000),redirect:'error'});if(!response.ok)throw new StoreError();const value=z.object({result:z.unknown().optional(),error:z.string().optional()}).parse(await response.json() as unknown);if(value.error)throw new StoreError();return value.result;}catch{throw new StoreError();}
+    try{const response=await this.fetcher(this.url,{method:'POST',headers:{Authorization:'Bearer '+this.options.token,'Content-Type':'application/json'},body:JSON.stringify(args),signal:AbortSignal.timeout(5000),redirect:'error'});if(!response.ok)throw new StoreError(response.status);const value=z.object({result:z.unknown().optional(),error:z.string().optional()}).parse(await response.json() as unknown);if(value.error)throw new StoreError();return value.result;}catch(error){throw error instanceof StoreError?error:new StoreError();}
   }
 }
 export const commitScript=`-- commit-v1
@@ -35,7 +36,7 @@ export class DemoStore {
   private stateKey(visitor:string){if(!z.string().uuid().safeParse(visitor).success)throw new Error('Visitante inválido');return this.namespace+':visitor:'+visitor;}
   private lockKey(visitor:string){return this.stateKey(visitor)+':lock';}
   async initialize(visitor:string):Promise<boolean>{return await this.redis.command(['SET',this.stateKey(visitor),JSON.stringify(emptyState()),'NX','EX',STATE_TTL])==='OK';}
-  async load(visitor:string):Promise<CloudState|null>{const raw=await this.redis.command(['GET',this.stateKey(visitor)]);if(raw===null)return null;if(typeof raw!=='string'||Buffer.byteLength(raw)>MAX_STATE_BYTES)throw new StoreError();try{return cloudStateSchema.parse(JSON.parse(raw) as unknown);}catch{throw new StoreError();}}
+  async load(visitor:string):Promise<CloudState|null>{const raw=await this.redis.command(['GET',this.stateKey(visitor)]);if(raw===null)return null;if(typeof raw!=='string'||Buffer.byteLength(raw)>MAX_STATE_BYTES)throw new StoreError();try{return cloudStateSchema.parse(JSON.parse(raw) as unknown);}catch(error){throw error instanceof StoreError?error:new StoreError();}}
   async acquire(visitor:string,owner:string):Promise<boolean>{return await this.redis.command(['SET',this.lockKey(visitor),owner,'NX','PX',LEASE_MS])==='OK';}
   async release(visitor:string,owner:string):Promise<void>{await this.redis.command(['EVAL',releaseScript,1,this.lockKey(visitor),owner]);}
   async commit(visitor:string,owner:string,expected:number,state:CloudState):Promise<void>{

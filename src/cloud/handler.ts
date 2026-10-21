@@ -1,3 +1,4 @@
+import { DiagnosticError, reportDiagnostic, type DiagnosticStage } from '../diagnostico.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -26,13 +27,14 @@ export function createCloudHandler(options:Options):(request:Request)=>Promise<R
       const remaining=deadline-now();if(remaining<=0)throw new Error('timeout');
       // Reserva conservadora de cupo, no facturación exacta. Nunca se devuelve tras error/crash.
       const charge=Buffer.byteLength(JSON.stringify(messages))+modelOptions.maxOutputTokens+16384;
-      if(!await store.reserveModel(charge,{calls:config.modelCalls,tokens:config.modelTokens,rpm:config.modelRpm}))throw new Error('quota');
+      let reserved:boolean;try{reserved=await store.reserveModel(charge,{calls:config.modelCalls,tokens:config.modelTokens,rpm:config.modelRpm});}catch(error){throw new DiagnosticError('REDIS_RESERVATION_FAILED','redis_reservation',error instanceof DiagnosticError?error.httpStatus:undefined);}
+      if(!reserved)throw new Error('quota');
       return real.enviar(messages,tools,{...modelOptions,signal:AbortSignal.any([modelOptions.signal,AbortSignal.timeout(Math.max(1,remaining))])});
     }};
     const value=new AgentEngine({directory,adapter,prompt:prompt+'\n\n'+knowledge,limits:{iterations:25,sessionTokens:120000,outputTokens:2048,timeoutMs:15000,sessions:5}});value.restoreState(raw);return value;
   }
   return async request=>{
-    const started=now();let visitor:string|null=null,owner:string|undefined,directory:string|undefined;
+    const started=now();let failureStage:DiagnosticStage='persistence';let visitor:string|null=null,owner:string|undefined,directory:string|undefined;
     try{
       const url=new URL(request.url);if(url.origin!==config.origin)throw new HttpError(403,'Origen no autorizado');
       visitor=visitorFromCookie(request.headers.get('cookie'),config.cookieSecret,now());
@@ -69,15 +71,16 @@ export function createCloudHandler(options:Options):(request:Request)=>Promise<R
       if(state.seenRequests.includes(requestId))throw new HttpError(409,'Turno ya guardado; consulte el estado antes de continuar');
       if(state.seenRequests.length>=100)throw new HttpError(429,'Límite de turnos por visitante alcanzado');
       if(!await store.rate('chat-day:'+day,50,172800))throw new HttpError(429,'Cupo diario de la demo agotado');
-      directory=await createWorkspace(options.assets,state.files);const value=await engine(directory,state.engine,started+100000);const result=await value.chat(body);
+      failureStage='workspace';directory=await createWorkspace(options.assets,state.files);const value=await engine(directory,state.engine,started+100000);const result=await value.chat(body);
       // Un registro fallido no publica un snapshot parcial, aunque otros temporales hayan cambiado.
       if(result.toolCalls.some(call=>call.name==='contratos_registrar'&&typeof call.result==='object'&&call.result!==null&&'ok'in call.result&&call.result.ok===false))throw new StoreError();
       const next={version:state.version+1,engine:value.exportState(),activeSessionId:result.sessionId,files:await snapshotFiles(directory),seenRequests:[...state.seenRequests,requestId],receipts:[...state.receipts,{id:requestId,hash:fingerprint,result}].slice(-4)};
-      await store.commit(visitor,owner,state.version,next);return json(200,result);
+      failureStage='persistence';await store.commit(visitor,owner,state.version,next);return json(200,result);
     }catch(error){
       if(error instanceof HttpError)return json(error.status,{error:error.message});
       if(error instanceof z.ZodError)return json(400,{error:'Solicitud o estado inválido'});
-      return json(503,{error:'Operación no confirmada. Conserve el requestId y reintente; no se presume que haya fallado el commit.'});
+      const diagnosticCode=reportDiagnostic(error,{stage:failureStage,provider:'gemini',model:config.model,started});
+      return json(503,{diagnosticCode,error:'Operación no confirmada. Conserve el requestId y reintente; no se presume que haya fallado el commit. [Diagnóstico: '+diagnosticCode+']'});
     }finally{
       if(visitor&&owner){try{await store.release(visitor,owner);}catch{/* El lease expira; no se repite un commit de resultado incierto. */}}
       if(directory){try{await removeWorkspace(directory);}catch{/* Temporal aislado; no es estado durable. */}}

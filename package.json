@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc",
     "check": "tsc --noEmit",
-    "test": "npm run build && node --test dist/tests/leer-buzon.test.js dist/tests/extraer.test.js dist/tests/registro.test.js dist/tests/agent.test.js dist/tests/presentacion.test.js dist/tests/cloud.test.js dist/tests/paquete-web.test.js",
+    "test": "npm run build && node --test dist/tests/leer-buzon.test.js dist/tests/extraer.test.js dist/tests/registro.test.js dist/tests/agent.test.js dist/tests/presentacion.test.js dist/tests/cloud.test.js dist/tests/paquete-web.test.js dist/tests/diagnostico.test.js",
     "demo": "npm run build && node dist/demo.js",
     "dev": "npm run build && node dist/src/server.js",
     "start": "node dist/src/server.js"

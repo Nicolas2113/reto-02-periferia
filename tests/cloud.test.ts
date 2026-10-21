@@ -86,3 +86,10 @@ test('Gemini: cuota/seguridad/respuesta inválida no fallback ni secretos en err
 test('Cloud: error previo al commit no publica un registro ni progreso temporal',async()=>{
   const s=setup(),cookie=await login(s.handler()),visitor=visitorFromCookie(cookie,config.cookieSecret,Date.now());assert.ok(visitor);const original=s.store.commit.bind(s.store);s.store.commit=async()=>{throw new Error('Redis no disponible');};assert.equal((await s.handler()(request('/api/chat',{message:instruction},cookie,randomUUID()))).status,503);const state=await s.store.load(visitor);assert.equal(state?.version,0);assert.deepEqual(state?.files,{});assert.deepEqual(state?.engine.sessions,[]);s.store.commit=original;
 });
+
+test('Diagnóstico cloud: fallo de reserva Redis tiene código propio sin detalle sensible',async()=>{
+  const s=setup(),cookie=await login(s.handler());s.store.reserveModel=async()=>{throw new Error('SENSITIVE_MARKER_NEVER_LOG');};const response=await s.handler()(request('/api/chat',{message:instruction},cookie,randomUUID()));assert.equal(response.status,200);const result=await response.json()as {diagnosticCode:string;reply:string};assert.equal(result.diagnosticCode,'REDIS_RESERVATION_FAILED');assert.ok(!JSON.stringify(result).includes('SENSITIVE_MARKER_NEVER_LOG'));
+});
+test('Diagnóstico cloud: assets ausentes se identifican sin publicar rutas internas',async()=>{
+  const s=setup(),handler=createCloudHandler({assets:path.join(assets,'missing-assets-for-test'),config,store:s.store,adapter:()=>s.adapter}),cookie=await login(handler);const response=await handler(request('/api/chat',{message:instruction},cookie,randomUUID()));assert.equal(response.status,503);const result=await response.json()as {diagnosticCode:string};assert.equal(result.diagnosticCode,'WORKSPACE_FAILED');assert.ok(!JSON.stringify(result).includes('missing-assets-for-test'));
+});

@@ -71,3 +71,10 @@ Referencias oficiales: [Vercel runtime](https://vercel.com/docs/functions/runtim
 - Variables obligatorias backend: APP_ORIGIN, GEMINI_MODEL, GEMINI_API_KEY, UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN, DEMO_ACCESS_CODE, DEMO_COOKIE_SECRET, DEMO_NAMESPACE. Límites opcionales: DEMO_MODEL_CALLS_DAY, DEMO_MODEL_TOKENS_DAY, DEMO_MODEL_RPM. No incluir variables Ollama para la función cloud.
 
 Other está documentado por Vercel como ausencia de framework: https://vercel.com/docs/project-configuration/vercel-json. Estos valores son instrucciones de configuración, no evidencia de un build/despliegue real. No crear ni conectar servicios como efecto de este commit.
+## Diagnóstico seguro de un turno fallido
+
+El fix de observabilidad añade `diagnosticCode` y `[Diagnóstico: CODIGO]` a la respuesta. El estado pendiente y la sesión se mantienen; un HTTP200 de chat no certifica herramientas ejecutadas. En Runtime Logs buscar `agent_diagnostic`: evento JSON con code, stage, provider/model de lista permitida, httpStatus si existe y durationMs. No incluye excepción cruda, stack, headers, cuerpos, prompts, claves ni firmas opacas.
+
+Códigos Gemini: GEMINI_HTTP_400/401/403/404/429/5XX/OTHER; GEMINI_TRANSPORT, GEMINI_SCHEMA, GEMINI_PROTOCOL, GEMINI_RESPONSE_INVALID y GEMINI_RESPONSE_BLOCKED. Backend: REDIS_RESERVATION_FAILED, PERSISTENCE_FAILED, WORKSPACE_FAILED, AUDIT_WRITE_FAILED, MODEL_RESPONSE_INVALID, MODEL_TIMEOUT, APP_QUOTA, SESSION_BUDGET y AGENT_FAILED. Un código identifica la categoría, no todos los detalles de la causa raíz. No se registra el cuerpo de error del proveedor.
+
+Después de verificar el deployment del commit del fix: enviar una sola consulta `Lista los mensajes pendientes` (solo lectura), copiar únicamente el código visible y revisar el evento del mismo momento en Runtime Logs. No enviar confirmaciones ni repetir el lote para diagnosticar. Si la categoría no permite resolverlo, continuar con diagnóstico específico autorizado; no cambiar modelo, habilitar gasto ni aumentar límites automáticamente. Los tests de estos códigos usan transportes simulados, sin claves reales.
