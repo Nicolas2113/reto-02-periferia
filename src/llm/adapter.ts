@@ -11,8 +11,10 @@ export interface ModelMessage {
   content: string;
   toolCalls?: ModelToolCall[];
   toolCallId?: string;
+  providerContent?: Record<string, unknown>;
 }
 export interface ModelResponse {
+  providerContent?: Record<string, unknown>;
   content: string;
   toolCalls: ModelToolCall[];
   usage?: { inputTokens: number; outputTokens: number };

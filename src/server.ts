@@ -1,3 +1,4 @@
+import { engineStateSchema, type EngineState } from './session-state.js';
 import { randomUUID } from 'node:crypto';
 import { appendFile, lstat, mkdir, readFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
@@ -28,12 +29,12 @@ const correctionSchema = z.object({
   fecha_inicio: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), fecha_fin: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   requiere_poliza: z.boolean().optional(), tipo_poliza: z.string().max(200).optional(),
 }).strict();
-const chatSchema = z.object({
+export const chatSchema = z.object({
   sessionId: z.string().uuid().optional(), message: z.string().min(1).max(12000),
   confirmation: z.object({ pendingId: z.string().uuid(), approved: z.literal(true), corrections: correctionSchema.default({}) }).strict().optional(),
 }).strict();
 export type ChatInput = z.infer<typeof chatSchema>;
-const responseSchema = z.object({ content: z.string(), toolCalls: z.array(z.object({
+const responseSchema = z.object({ providerContent:z.record(z.unknown()).optional(), content: z.string(), toolCalls: z.array(z.object({
   id: z.string(), name: z.string(), args: z.record(z.unknown()),
 })).max(25), usage: z.object({ inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative() }).optional(),
   diagnostics: z.object({ doneReason: z.string().optional(), contextTokens: z.number().optional(), outputLimit: z.number().optional() }).optional() });
@@ -83,7 +84,24 @@ export class AgentEngine {
     this.tools = options.tools ?? registry(); this.catalog = definitions(this.tools);
     for (const value of Object.values(this.limits)) if (!Number.isInteger(value) || value <= 0) throw new Error('Límites inválidos');
   }
-  health() { return { ok: true, provider: this.options.adapter.provider, model: this.options.adapter.model, configured: this.options.adapter.configured }; }
+  exportState():EngineState {
+    if([...this.sessions.values()].some(session=>session.busy))throw new Error('No se guarda una sesión ejecutándose');
+    return engineStateSchema.parse({version:1,sessions:[...this.sessions.values()].map(session=>({
+      id:session.id,messages:session.messages,history:session.history,contracts:[...session.contracts],nonContracts:[...session.nonContracts],
+      pending:session.pending,turn:session.turn,spent:session.spent,batch:session.batch,
+    }))});
+  }
+  restoreState(raw:unknown):void {
+    if(this.sessions.size)throw new Error('La restauración requiere un motor nuevo');
+    const state=engineStateSchema.parse(raw);
+    if(state.sessions.length>this.limits.sessions||new Set(state.sessions.map(s=>s.id)).size!==state.sessions.length)throw new Error('Estado de sesiones inválido');
+    for(const saved of state.sessions){
+      if(new Set(saved.contracts.map(([id])=>id)).size!==saved.contracts.length)throw new Error('Contratos repetidos en estado');
+      const contracts=new Map(saved.contracts);
+      if(saved.pending&&(saved.pending.turn!==saved.turn||!contracts.has(saved.pending.messageId)))throw new Error('Revisión persistida inválida');
+      this.sessions.set(saved.id,{...saved,history:saved.history as Session['history'],contracts,nonContracts:new Set(saved.nonContracts),busy:false,batchActive:false,compactBatch:true});
+    }
+  }  health() { return { ok: true, provider: this.options.adapter.provider, model: this.options.adapter.model, configured: this.options.adapter.configured }; }
   session(id: string) {
     const current = this.sessions.get(id);
     return current ? { id, history: current.history, batch: publicBatch(current.batch), pending: this.publicPending(current), budget: { consumed: current.spent, limit: this.limits.sessionTokens } } : null;
@@ -301,7 +319,7 @@ export class AgentEngine {
             if(session.compactBatch)this.compactContext(session);
           }
           const response = await this.modelCall(session);
-          session.messages.push({ role: 'assistant', content: response.content, toolCalls: response.toolCalls });
+          session.messages.push({ role: 'assistant', content: response.content, toolCalls: response.toolCalls, ...(response.providerContent?{providerContent:response.providerContent}:{}) });
           if (!response.toolCalls.length) {
             if(session.batchActive&&session.batch){
               const key=JSON.stringify(nextAction(session.batch));
@@ -373,6 +391,7 @@ export class AgentEngine {
       }
     } catch (error) {
       reply = error instanceof Error && error.message === 'timeout' ? 'El modelo tardó demasiado. La sesión se conserva; puede intentar otra vez.'
+        : error instanceof Error && error.message === 'quota' ? 'Cuota temporal o diaria agotada. El progreso se conserva; espere antes de continuar.'
         : error instanceof Error && error.message === 'budget' ? 'Se alcanzó el presupuesto de esta sesión. Revise los resultados obtenidos.'
         : 'No se pudo completar el turno del modelo o herramienta. La sesión se conserva; revise la configuración local y vuelva a intentar.';
     } finally {

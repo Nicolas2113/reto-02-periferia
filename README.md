@@ -72,3 +72,7 @@ Fidelidad de alertas: la herramienta entrega hoy, límite de 60 días, corte y e
 URL pública: **no disponible**. Se prepara defensa local con Ollama; PRD §9.3 admite esa alternativa con penalización de -10 puntos. No se ha publicado ni enviado una entrega.
 
 Excluir node_modules/, dist/, out/, .env y logs conforme .gitignore; sí entregar .env.example sin secretos. Los adjuntos se archivan como TXT reales, no PDF ficticios. Sin OCR, revisión jurídica, multiusuario, autenticación, streaming ni bonus. El parser cubre la familia de TXT entregada, no documentos arbitrarios. CSV y cola de escritura son de un proceso; no sustituyen una base de datos con recuperación ante caída.
+
+## Adaptación web (rama web-version)
+
+Preparación local para Vercel + Gemini + Upstash Redis: ver [DESPLIEGUE.md](DESPLIEGUE.md). No está desplegada ni conectada a esos servicios todavía. Mantiene Ollama local y demo sin modelo. Verificación de esta rama: check/build y 69/69 pruebas; las pruebas cloud usan dobles explícitos, no APIs reales. No poner claves en Git ni en el chat. La guía describe límites, configuración futura y comprobaciones reales pendientes.

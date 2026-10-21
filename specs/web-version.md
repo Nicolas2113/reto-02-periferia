@@ -1,0 +1,83 @@
+# Web version: adaptación a Vercel y Gemini
+
+Spec previa a implementación, 2026-10-21. Rama web-version desde main4394509125cdbb27629aae16cdddde4bfffe8f39, árbol inicialmente limpio. PRD.md sigue como única fuente de requisitos: HU1-HU6, §6.1-§6.5, CA1-CA5 y §11. Las decisiones de despliegue derivan de la solicitud del usuario: Vercel, Google AI Studio y coste cero dentro de planes gratuitos. Esta fase crea solo rama y plan; no modifica código, out, PRD ni fixtures, no lee claves, no instala, no configura servicios, no despliega ni hace commit/push.
+
+## Diagnóstico del código actual
+
+| Componente | Estado comprobado | Adaptación necesaria |
+|---|---|---|
+| src/server.ts | createServer, listen127.0.0.1 y process.cwd() en arranque CLI | Entrada de Vercel Function Node, conservando CLI local y contratos API; no depender de npm start persistente |
+| AgentEngine | Map de sesiones/contratos, Set de no contratos, pending/turn/batch/spent/busy en memoria | Codec validado y almacén externo para reanudar en otra instancia; memoria solo como caché |
+| src/llm/ollama.ts | HTTP127.0.0.1:11434, modelo local | Adaptador Gemini detrás de LlmAdapter; Vercel no puede acceder al Ollama de Spider-13 |
+| Context.directory y src/almacen.ts | Lee fixtures y escribe out/ bajo el mismo directorio | Inputs empaquetados inmutables; workspace temporal por invocación; out lógico respaldado por persistencia durable |
+| Maestro/procesados/archivos/historial/alertas/log | Autoridad actual en archivos locales | Estado durable coherente y exportable; no confundir existencia en /tmp con persistencia |
+| withWriteLock/commitFiles | Cola Promise en un proceso; temporales/rename con rollback local | Exclusión/versión entre instancias y confirmación del commit durable; reintentos idempotentes |
+
+## Runtime y archivos
+
+Vercel Functions tiene filesystem de solo lectura y /tmp temporal de hasta500MB [runtime](https://vercel.com/docs/functions/runtimes). En Hobby con Fluid Compute, la duración documentada es300s por invocación [duración](https://vercel.com/docs/functions/configuring-functions/duration). Estos límites no convierten a la función en servidor permanente.
+
+Propuesta mínima: frontend estático de web/ y handler Node TypeScript api/index.ts con rutas equivalentes /api/chat, /api/health y /api/sessions/:id. El runtime admite entrada HTTP/fetch y TypeScript en api/ [Node](https://vercel.com/docs/functions/runtimes/node-js). Verificar build/rewrites/versión Node soportada e inclusión explícita de agent/, knowledge/ y fixtures; las rutas dinámicas actuales no garantizan su empaquetado. No publicar esos directorios como contenido estático. El handler puede importar AgentEngine, pero su arranque, carga de sesiones y persistencia necesitan adaptación; no basta reexportar el listener actual.
+
+El workspace /tmp se materializa desde fixtures empaquetados y un estado validado del almacén. Los archivos exportados conservan formato/nombres lógicos out/; no importar el out actual del candidato ni iniciar nubes con su demo ya procesada. Crear estado inicial solo de forma explícita una vez por entorno, nunca al abrir sesión o consultar health. Configurar exclusiones de publicación para .env, .git, node_modules, dist local, out y respaldos; no subir secretos. Mantener guardas de rutas/links y aislamiento de temporales.
+
+Límite temporal total de aplicación menor que el máximo de plataforma, con margen para guardar estado. Los25 pasos,120000 tokens y90000ms por llamada actuales no garantizan encajar en300s sumados; añadir deadline total sin aumentar topes. Si hay cuota o deadline, guardar progreso y responder pending/error. No mantener solicitudes dormidas ni prometer trabajos en background sin infraestructura. Una continuación técnica/reintento no crea un nuevo turno humano ni concede aprobación CA3.
+
+## Decisión pendiente: persistencia gratuita
+
+Opción recomendada para esta demo: Upstash Redis Free, pendiente de aceptación/cuenta y de comprobar disponibilidad real. La tarifa pública indica$0,250MB,500K comandos/mes y10GB de transferencia/mes [precio](https://upstash.com/pricing/redis). No se ha creado recurso ni aceptado facturación. Elegir explícitamente Free, sin upgrade automático, y acotar almacenamiento/logs/comandos.
+
+Guardar por entorno demo: maestro, procesados, historial, TXT archivados, alertas/logs y sesiones serializadas. Propuesta de mínima concurrencia: un lote activo por entorno, estado versionado, adquisición/renovación de bloqueo y comparación de versión atómicas. El versionado debe impedir que un worker cuyo bloqueo expiró sobrescriba un commit nuevo. Asociar requestId a resultados para no repetir una confirmación/registro por reintento HTTP. Confirmar una escritura solo después del commit durable coherente de maestro/procesados/archivo/historial; si falla, no mostrar éxito. Determinar una operación atómica de Redis compatible antes de implementar; no sustituirla por GET+SET sin protección.
+
+Mantener sesiones separadas del maestro compartido del entorno: historial, contratos y no contratos, turno humano, pendingId/snapshot/campos, lote, presupuesto y control de concurrencia. Validar codecs con zod; los Map/Set no se serializan como JSON normal sin adaptación. Guardar la revisión antes de responder y cargarla en el siguiente turno, incluso en otra instancia. Una confirmación del modelo sigue sin autorizar; pending viejo/doble/alterado o datos inválidos deben conservar la pausa.
+
+Alternativa: un almacén gratuito ya disponible que soporte las mismas operaciones atómicas; elegir antes de codificar. Usar solo /tmp+Map evita un servicio adicional pero pierde continuidad/maestro al reciclar instancias; solo sería una demo efímera expresamente aceptada, no una solución que pueda certificarse con CA3/idempotencia. localStorage del navegador no puede ser autoridad de aprobaciones ni del maestro. No se propone como opción equivalente.
+
+## Gemini configurable: candidato3.8Flash, acceso aún sin probar
+
+Actualización recibida: las capturas del usuario muestran gemini-3.8-flash, gemini-3.5-flash-lite y gemini-3.1-pro-preview; otra captura identifica el proyecto como Nivel gratuito. El candidato propuesto es gemini-3.8-flash, configurable por GEMINI_MODEL. No se ha confirmado su cuota/acceso efectivo ni se ha hecho una petición con la clave. No activar fallback pagado.
+
+La documentación pública publica entrada/salida gratuitas en Standard para gemini-3.8-flash y gemini-3.5-flash-lite; gemini-3.1-pro-preview no tiene free tier [precios](https://ai.google.dev/gemini-api/docs/pricing). Ver un modelo en el selector o tener una clave gratuita no demuestra cuota utilizable de API. Confirmar modelo definitivo y RPM/TPM/RPD efectivos del proyecto en AI Studio, sin clave: la cuota es por proyecto, no por API key, y varía por modelo [cuotas](https://ai.google.dev/gemini-api/docs/rate-limits). No se habilita facturación.
+
+El flujo local medido usó18 llamadas al modelo en dos turnos; no trasladar a Gemini su latencia ni conteo de tokens. La guía oficial muestra tool calling con3.8Flash [function calling](https://ai.google.dev/gemini-api/docs/function-calling), pero falta validar la secuencia real con los schemas propios dentro del cupo gratuito confirmado.
+Adaptador futuro src/llm/gemini.ts: mapear system/content, llamadas nativas, ID/nombre/argumentos y resultados a la interfaz propia. Preferir SDK oficial @google/genai del registro npm, si se decide añadirlo; no permitir ejecución automática de herramientas por el SDK. Solo el backend actual decide ejecutar/validar/confirmar. Traducir schemas zod al subconjunto admitido por Gemini y mantener validación local estricta; no copiar sin verificar el conversor de Ollama [function calling](https://ai.google.dev/gemini-api/docs/function-calling).
+
+Con modelos3.x hay metadatos opacos de continuidad/thought signatures; la interfaz actual solo conserva texto y toolCalls. Preservar partes/metadatos necesarios al reproducir una conversación o utilizar gestión compatible del SDK, sin inventar firmas ni publicarlas en frontend/logs. La compactación actual tras cada etapa también debe probarse contra ese protocolo [thinking](https://ai.google.dev/gemini-api/docs/thinking). No prometer compatibilidad hasta probar una secuencia llamada→resultado→siguiente llamada con el modelo exacto.
+
+Configuración futura, no creada: GEMINI_API_KEY exclusivamente backend y GEMINI_MODEL confirmado; variables del almacén solo en backend. No solicitar claves por chat, no leer valores .env y no añadirlos al Git. Contabilizar tokens reales incluyendo razonamiento conforme al proveedor; cero/ausencia de usage no significa coste/cupo cero.
+
+## Coste cero y errores
+
+Mantener planes Free sin habilitar pago ni reintentos ilimitados. Nada de grounding/Search, imágenes, herramientas de pago ni cambio automático de modelo. Añadir cupo global de aplicación por entorno, límite de entrada y pacing adaptado a cuotas verificadas: un enlace público no debe permitir agotar el presupuesto sin límites del backend. Si no queda cuota, detenerse y conservar estado; no comprar capacidad. La tarifa gratuita de Gemini permite uso del contenido para mejorar productos: usar solo fixtures ficticios en ensayos [precios](https://ai.google.dev/gemini-api/docs/pricing).
+
+Errores legibles:401/403 configuración/acceso,404 modelo no disponible,400 schema/protocolo,429 cuota y5xx/timeout proveedor. Reintento transitorio como máximo acotado al presupuesto/deadline y Retry-After, sin repetir efectos ya confirmados [errores](https://ai.google.dev/gemini-api/docs/troubleshooting). Guardar estado y distinguir operación no ejecutada de resultado incierto. No registrar body completo del SDK/headers/secretos. Hobby es un plan gratuito para uso personal no comercial y tiene cuotas: verificar que esta demo personal de evaluación encaja antes de conectar/publicar [Hobby](https://vercel.com/docs/plans/hobby).
+
+## Bloques de implementación previstos y aceptación
+
+1. Decidir almacén durable gratuito y confirmar modelo/cupo. No crear servicios en esta fase.
+2. Adaptador Gemini con respuestas fake explícitas: schemas, tool calling, usage, truncado/bloqueo y errores, sin llamadas reales aún. Mantener pruebas/demo sin modelo.
+3. Serialización/persistencia y workspace temporal: cold start A→B con revisión pendiente, doble petición concurrente, confirmación vieja/alterada, reintento tras timeout/commit incierto y fallo de persistencia. No duplicados ni corrupción silenciosa.
+4. Handler Vercel y assets: health/chat/history con memoria vacía en cada invocación, origen/build estáticos y exports seguros; deadline y cuotas. Confirmación explícita sigue separada de continuaciones técnicas.
+5. Regresión57 pruebas base y nuevas; fixtures originales inmutables; cinco cierres/10filas antes de revisión006 y seis/11 después de datos humanos explícitos. Alertas exactas tras último registro y trazas visibles. Sin escribir sobre out raíz del candidato.
+6. Solo con autorización posterior: configurar secretos fuera del repositorio, ensayo mínimo real dentro de free tier verificado, luego publicar y probar URL en navegador/incógnito y tras cold start. No afirmar link público ni Gemini operativo antes de comprobarlos.
+
+Estado histórico al cerrar la fase inicial (antes de autorizar implementación): diagnóstico y plan; sin código de adaptación implementado, sin tests nuevos ni llamadas Gemini. La base main ya tenía57/57 correctos; no se repiten por un cambio exclusivamente documental. Decisiones pendientes: confirmación y cuota Gemini (candidato gemini-3.8-flash) y aceptación de almacén durable Free. No se modifican README/SOLUCION en este paso.
+## Diseño previo al bloque de implementación autorizado
+Upstash Redis Free aceptado para datos ficticios. El requisito reciente de aislamiento se implementará con un workspace durable por visitante, separado por cookie HttpOnly firmada y sin aceptar estado de sesión desde el cliente. Cada visitante tiene su maestro/procesados/archivos y varias conversaciones sobre ese mismo buzón; abrir conversación no reinicia datos. Sustituye la propuesta anterior de maestro compartido entre visitantes. Cuotas globales comparten namespace de despliegue.
+
+Commit de un turno como snapshot atómico: sesiones serializadas+out+últimos resultados por requestId. Todo efecto de herramientas sucede primero en /tmp aislado; solo se devuelve éxito al confirmar el snapshot durable mediante Lua con dueño de bloqueo y versión. Lease150s supera el máximo de la función120s; deadline de aplicación100s, sin renovar leases ambiguos. Un worker con lease vencido no puede hacer commit. Si la respuesta del commit es incierta se exige reintentar el mismo requestId; el resultado guardado evita repetir efectos. Caída antes del commit descarta solo temporales, nunca un registro durable previo.
+
+API pública cerrada sin configuración: código de acceso de demo y secreto de firma solo backend; cookies Secure/HttpOnly/SameSite=Strict, origen exacto para escrituras, límite de tamaño y cuotas compartidas durables antes de llamadas al modelo. No hay secreto predeterminado usable. Modelo restringido a lista gratuita explícita, sin cambio automático. Gemini vía REST oficial con fetch inyectable para mocks; conservar metadatos opacos de respuesta al reproducir historial. No se instalarán SDKs si REST y dependencias actuales bastan.
+
+Verificación nueva prevista: persistencia cold-start/aislamiento, pending viejo/forjado, registro confirmado y replay; concurrencia y worker vencido; commit ambiguo/fallido sin éxito falso; cuota global y proveedor429; paths de snapshots y configuración faltante; payloads de Gemini y schemas/metadatos; bundle offline con assets declarados. Sin API real ni configuración de cuentas. Comprobación Vercel autenticada y gratuita real queda pendiente de conexión posterior.
+## Resultado del bloque local autorizado (21 octubre 2026)
+
+Implementado: entrada Vercel Node sin listener, adaptador Gemini REST intercambiable, serialización zod de sesiones/pending, Upstash REST con snapshots CAS/Lua y leases, espacios por visitante/cookie firmada, cuotas compartidas, rechazo de configuración incompleta, acceso backend, recuperación de sesión y reintento del navegador con requestId estable. Archivos nuevos: api/index.ts, src/session-state.ts, src/llm/gemini.ts, src/cloud/{handler,store,workspace,security}.ts, vercel.json, .vercelignore y pruebas. Configuración y explicación detalladas en DESPLIEGUE.md; .env.example solo marcadores. No se añadieron dependencias.
+
+El modelo conserva su rol: el doble de pruebas elige la llamada del catálogo de la etapa; las herramientas son las reales. No se implementó una demo falsa como agente web. La compactación de lote inicia contexto acotado para cada etapa; cuando se reproduce una llamada nativa se mantienen sus partes opacas. Compatibilidad de ese protocolo con el modelo real queda pendiente.
+
+Verificación: check sin errores, build correcto y 69/69 tests. Incluye 57 regresiones y 12 pruebas nuevas: cold starts con revisión+continuación 10→11, aislamiento/IDs ajenos, confirmación forjada, commit de resultado incierto y replay, lease/CAS/dueño expirado, configuración/origen/cuotas, artefactos inseguros, transporte Gemini nativo/metadata/errores, recibos antiguos y corrupción, fallo antes del commit, paquete aislado offline y reintento DOM. Casos006 usan exclusivamente valores humanos ficticios identificados por el test, nunca datos extraídos inventados. PRD+fixtures+out: 24 hashes iguales. Main4394509 intacta. Sin commit/push/deploy.
+
+Límites explícitos: Lua validado por doble de protocolo, no Redis real; carga de paquete offline, no builder Vercel; DOM simulado, no navegador cloud. Ninguna petición Gemini/Upstash real. Configuración predeterminada 1 RPM conservadora pausa etapas y requiere esperar/continuar; no prometer lote completo hasta cuota efectiva. No nueva fase ni servicios/claves configurados mientras el usuario revisa. Datos demo expiran: cookie2h absoluta, estado2h desde commit; no archivo permanente ni usuarios empresariales. Reservas de consumo conservadoras, no contabilidad calibrada ni garantía de cuota. Recibos últimos4, IDs hasta100 impiden replay al desalojarse un resultado. Un commit fallido no publica éxito ni temporales parciales.
+
+Sigue pendiente con permiso posterior: servicios Free y secretos backend, ID/cuota efectivos, build real, tool calling real (incluida continuidad), Lua real, cold start real y flujo público en navegador. No afirmar despliegue ni proveedor verificado antes de completarlo.

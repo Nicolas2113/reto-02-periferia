@@ -4,12 +4,13 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createContext, runInContext } from 'node:vm';
+import { randomUUID } from 'node:crypto';
 
 // DOM simulado: no sustituye una comprobacion visual en navegador.
 class DomNode {
   readonly children: DomNode[]=[];
   readonly attributes: Record<string,string>={};
-  className=''; hidden=false; value: string|number=''; tabIndex=0;
+  className=''; hidden=false; disabled=false; value: string|number=''; tabIndex=0;
   private text='';
   constructor(readonly tagName:string) {}
   get childNodes(){return this.children;}
@@ -24,15 +25,15 @@ class DomNode {
   focus(){}
 }
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..','..');
-async function runtime(){
+async function runtime(fetcher?:(url:string,options?:{headers?:Record<string,string>;body?:string})=>Promise<{ok:boolean;status:number;json:()=>Promise<Record<string,unknown>>}>){
   const html=await readFile(path.join(root,'web','index.html'),'utf8');
   const script=html.match(/<script>([\s\S]*?)<\/script>/)?.[1];assert.ok(script);
   const nodes=new Map<string,DomNode>();
   const document={createElement:(tag:string)=>new DomNode(tag),createTextNode:(text:string)=>{const node=new DomNode('#text');node.textContent=text;return node;},getElementById:(id:string)=>{let node=nodes.get(id);if(!node){node=new DomNode('div');nodes.set(id,node);}return node;}};
   const target=new DomNode('div');
-  const sandbox={document,target,input:'',role:'Asistente',calls:[] as unknown[],fetch:async()=>({json:async()=>({configured:true,provider:'fake_DOM',model:'sin_LLM'})})};
+  const sandbox={document,target,input:'',role:'Asistente',calls:[] as unknown[],crypto:{randomUUID},fetch:fetcher??(async()=>({ok:true,status:200,json:async()=>({configured:true,provider:'fake_DOM',model:'sin_LLM'})}))};
   const context=createContext(sandbox);runInContext(script,context);
-  return {target,nodes,sandbox,render:(text:string)=>{sandbox.input=text;runInContext('renderMarkdown(target,input)',context);return target;},message:(role:string,text:string,calls:unknown[]=[])=>{sandbox.role=role;sandbox.input=text;sandbox.calls=calls;runInContext('message(role,input,calls)',context);return document.getElementById('messages');}};
+  return {target,nodes,sandbox,context,render:(text:string)=>{sandbox.input=text;runInContext('renderMarkdown(target,input)',context);return target;},message:(role:string,text:string,calls:unknown[]=[])=>{sandbox.role=role;sandbox.input=text;sandbox.calls=calls;runInContext('message(role,input,calls)',context);return document.getElementById('messages');}};
 }
 function all(node:DomNode):DomNode[]{return [node,...node.children.flatMap(all)];}
 const find=(node:DomNode,tag:string)=>all(node).filter(value=>value.tagName===tag);
@@ -102,4 +103,12 @@ test('Presentacion: Markdown incompleto conserva texto y bloques de codigo no ej
   assert.ok(view.textContent.includes('Línea dos **sin cierre'));assert.ok(view.textContent.includes('| fila | con | exceso |'));
   assert.equal(find(view,'br').length,1);assert.equal(find(view,'ol').length,1);assert.equal(find(view,'ol')[0]?.children[0]?.value,1);
   assert.equal(find(view,'code')[0]?.textContent,'<script>alert(1)</script>');assert.equal(find(view,'script').length,0);
+});
+test('Cloud UI: reintento de red conserva requestId y cuerpo, sin duplicar mensaje humano',async()=>{
+  const packets:{id:string|undefined;body:string|undefined}[]=[];
+  const ui=await runtime(async(url,options)=>{if(url==='/api/health')return {ok:true,status:200,json:async()=>({configured:true,cloud:false,provider:'fake_DOM',model:'sin_LLM'})};packets.push({id:options?.headers?.['x-request-id'],body:options?.body});if(packets.length===1)throw new Error('network');return {ok:true,status:200,json:async()=>({sessionId:randomUUID(),reply:'Respuesta recuperada',toolCalls:[],pending:null})};});
+  await new Promise<void>(resolve=>setImmediate(resolve));
+  await runInContext("cloudMode=true;send('Consulta inocua')",ui.context);assert.equal(ui.nodes.get('retry-request')?.hidden,false);assert.equal(ui.nodes.get('send')?.disabled,true);
+  await runInContext("send('',undefined,retryPacket)",ui.context);assert.equal(packets.length,2);assert.deepEqual(packets[0],packets[1]);assert.ok(packets[0]?.id);assert.equal(ui.nodes.get('retry-request')?.hidden,true);
+  const log=ui.nodes.get('messages');assert.ok(log);assert.equal(all(log).filter(node=>node.className==='message-body plain'&&node.textContent==='Consulta inocua').length,1);
 });
