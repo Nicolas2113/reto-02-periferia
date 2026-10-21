@@ -7,6 +7,7 @@ import { z } from 'zod';
 import * as exports from './tools/contratos.js';
 import { UnconfiguredAdapter, type LlmAdapter, type ModelMessage, type ModelToolCall, type ToolDefinition } from './llm/adapter.js';
 import { OllamaAdapter } from './llm/ollama.js';
+import { batchGuide, batchSummary, newBatch, nextAction, observeBatch, publicBatch, referenceDate, refreshBatch, wantsBatch, type Batch } from './flujo.js';
 
 type JsonObject = Record<string, unknown>;
 interface Tool {
@@ -17,8 +18,8 @@ export type ToolRegistry = Record<string, Tool>;
 export interface Trace { name: string; arguments: JsonObject; result: unknown }
 interface Pending { id: string; turn: number; messageId: string; contract: JsonObject; fields: string[] }
 interface Session {
-  id: string; messages: ModelMessage[]; history: { role: string; content: string; toolCalls?: Trace[] }[];
-  contracts: Map<string, JsonObject>; nonContracts: Set<string>; pending?: Pending; turn: number; spent: number; busy: boolean;
+  id: string; messages: ModelMessage[]; history: { role: string; content: string; toolCalls?: Trace[]; batch?: ReturnType<typeof publicBatch> }[];
+  contracts: Map<string, JsonObject>; nonContracts: Set<string>; pending?: Pending; turn: number; spent: number; busy: boolean; batch?: Batch; batchActive?: boolean; compactBatch?: boolean;
 }
 export interface Limits { iterations: number; sessionTokens: number; outputTokens: number; timeoutMs: number; sessions: number }
 const defaults: Limits = { iterations: 25, sessionTokens: 120000, outputTokens: 2048, timeoutMs: 90000, sessions: 50 };
@@ -85,7 +86,7 @@ export class AgentEngine {
   health() { return { ok: true, provider: this.options.adapter.provider, model: this.options.adapter.model, configured: this.options.adapter.configured }; }
   session(id: string) {
     const current = this.sessions.get(id);
-    return current ? { id, history: current.history, pending: this.publicPending(current), budget: { consumed: current.spent, limit: this.limits.sessionTokens } } : null;
+    return current ? { id, history: current.history, batch: publicBatch(current.batch), pending: this.publicPending(current), budget: { consumed: current.spent, limit: this.limits.sessionTokens } } : null;
   }
   private publicPending(session: Session) {
     const pending = session.pending;
@@ -131,14 +132,38 @@ export class AgentEngine {
       const fields = Array.isArray(data.requiere_revision) ? data.requiere_revision.filter((field): field is string => typeof field === 'string') : [];
       if (fields.length && normalized) session.pending = { id: randomUUID(), turn: session.turn, messageId: id, contract: clone(normalized), fields };
     }
+    if (session.batchActive && session.batch && name !== 'contratos_alertas') {
+      observeBatch(session.batch,name,id,result);
+      session.compactBatch=true;
+    }
     return result;
   }
   private question(session: Session): string {
     const pending = session.pending;
     return pending ? `Necesito confirmación humana para ${pending.messageId}: ${pending.fields.join(', ')}. Revise los valores mostrados y complete los ausentes en el formulario antes de confirmar. No se ha registrado este contrato.` : 'No hay confirmación pendiente.';
   }
+  private compactContext(session: Session): void {
+    const batch=session.batch;
+    if(!batch)return;
+    const next=nextAction(batch),contract=next?.messageId?session.contracts.get(next.messageId):undefined;
+    session.messages=[{role:'system',content:this.options.prompt},{role:'user',content:batch.originalRequest},
+      {role:'system',content:batchGuide(batch)+(contract?'\nSnapshot actual obtenido de herramientas: '+compactToolResult(contract):'')}];
+    session.compactBatch=false;
+  }
+  private availableCatalog(session: Session): ToolDefinition[] {
+    if(!session.batchActive||!session.batch)return this.catalog;
+    const next=nextAction(session.batch);
+    return this.catalog.filter(tool=>tool.name===next?.tool).map(tool=>({...tool,
+      description:tool.description+' Etapa autorizada del lote: '+JSON.stringify(next),
+      parameters:z.object({...tool.parameters.shape,
+        ...(next?.messageId?{mensaje_id:z.literal(next.messageId).describe('Mensaje actual del lote; no cambiarlo')}:{}),
+        ...(next?.hoy?{hoy:z.literal(next.hoy).describe('Fecha original aportada por la persona para este reporte')}:{}),
+      }).strict(),
+    }));
+  }
   private async modelCall(session: Session): Promise<z.infer<typeof responseSchema>> {
-    const bytes = Buffer.byteLength(JSON.stringify(session.messages) + JSON.stringify(this.catalog.map(tool => ({ name: tool.name, description: tool.description }))));
+    const catalog=this.availableCatalog(session);
+    const bytes = Buffer.byteLength(JSON.stringify(session.messages) + JSON.stringify(catalog.map(tool => ({ name: tool.name, description: tool.description }))));
     const reserve = bytes + this.limits.outputTokens;
     if (session.spent + reserve > this.limits.sessionTokens) throw new Error('budget');
     // Reserva conservadora: bytes de texto son una cota operativa, no facturación exacta.
@@ -147,7 +172,7 @@ export class AgentEngine {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const response = responseSchema.parse(await Promise.race([
-        this.options.adapter.enviar(session.messages, this.catalog, { signal: controller.signal, maxOutputTokens: this.limits.outputTokens }),
+        this.options.adapter.enviar(session.messages, catalog, { signal: controller.signal, maxOutputTokens: this.limits.outputTokens }),
         new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error('timeout')); }, this.limits.timeoutMs); }),
       ]));
       const actual = response.usage ? response.usage.inputTokens + response.usage.outputTokens : 0;
@@ -163,7 +188,17 @@ export class AgentEngine {
       return response;
     } finally { if (timer) clearTimeout(timer); }
   }
+  private stageAllowed(session: Session, call: ModelToolCall): boolean {
+    if(!session.batchActive||!session.batch)return true;
+    const next=nextAction(session.batch);
+    return Boolean(next&&call.name===next.tool&&(!next.messageId||call.args.mensaje_id===next.messageId)
+      &&(!next.hoy||call.args.hoy===next.hoy)&&this.availableCatalog(session).find(tool=>tool.name===call.name)?.parameters.safeParse(call.args).success);
+  }
   private async perform(session: Session, call: ModelToolCall, traces: Trace[]): Promise<unknown> {
+    if(!this.stageAllowed(session,call)&&session.batch){
+      const result={ok:false,error:'Llamada fuera de etapa, mensaje o argumentos del lote. '+batchGuide(session.batch)};
+      await this.trace(session,call.name,call.args,result,traces);session.compactBatch=true;return result;
+    }
     let args = clone(call.args);
     if (call.name === 'contratos_validar' || call.name === 'contratos_registrar') {
       const id = typeof args.mensaje_id === 'string' ? args.mensaje_id : '';
@@ -241,16 +276,39 @@ export class AgentEngine {
     const positiveAlerts = /\b(?:genera\w*|crea\w*|produce\w*|elabora\w*|termina\w*)\b[^.!?]{0,90}\b(?:reporte|informe)?[^.!?]{0,30}\balertas\b/i.test(input.message);
     const negativeAlerts = /\b(?:no|sin)\s+(?:(?:gener\w*|cre\w*|produc\w*|elabor\w*)\s+)?(?:(?:el|un)\s+)?(?:(?:reporte|informe)\s+de\s+)?alertas\b/i.test(input.message);
     const requestedAlerts = operational && positiveAlerts && !negativeAlerts;
+    if (!session.pending && wantsBatch(input.message)) {
+      if (!session.batch || session.batch.status === 'complete') session.batch=newBatch(input.message,requestedAlerts);
+      else if(!session.batch.referenceDate)session.batch.referenceDate=referenceDate(input.message);
+    }
+    session.batchActive=Boolean(session.batch&&(wantsBatch(input.message)||session.pending||input.confirmation||/^\s*(?:contin[uú]a|reanuda)\b/i.test(input.message)));
+    if(session.batchActive&&session.batch){session.compactBatch=true;session.batch.paused=false;}
+    let batchGuidanceKey='';
     let guidedRetry = false;
     let alertsRetry = false;
     try {
-      if (session.pending || input.confirmation) reply = await this.confirm(session, input, traces);
-      else if (!this.options.adapter.configured) reply = 'Falta configurar un proveedor LLM. La demo determinista funciona sin modelo; el chat no simula un LLM.';
-      else {
+      if (session.pending || input.confirmation) {
+        reply = await this.confirm(session, input, traces);
+        if(session.batchActive&&!session.pending&&traces.some(trace=>trace.name==='contratos_registrar'&&object(trace.result)?.ok===true)){
+          reply='';session.compactBatch=true;
+        }
+      }
+      if (!reply && !this.options.adapter.configured) reply = 'Falta configurar un proveedor LLM. La demo determinista funciona sin modelo; el chat no simula un LLM.';
+      else if(!reply) {
         for (let iteration = 0; iteration < this.limits.iterations; iteration++) {
+          if(session.batchActive&&session.batch){
+            refreshBatch(session.batch);
+            if(!nextAction(session.batch)){reply=batchSummary(session.batch);break;}
+            if(session.compactBatch)this.compactContext(session);
+          }
           const response = await this.modelCall(session);
           session.messages.push({ role: 'assistant', content: response.content, toolCalls: response.toolCalls });
           if (!response.toolCalls.length) {
+            if(session.batchActive&&session.batch){
+              const key=JSON.stringify(nextAction(session.batch));
+              if(batchGuidanceKey===key){reply='El modelo no ejecutó la siguiente etapa; el lote queda pendiente.\n\n'+batchSummary(session.batch);break;}
+              batchGuidanceKey=key;
+              session.messages.push({role:'user',content:batchGuide(session.batch)});continue;
+            }
             if (response.diagnostics?.doneReason === 'length') {
               session.messages.push({ role: 'user', content: 'La salida anterior alcanzó el límite de tokens. Continúa usando herramientas desde el último resultado confirmado; no repitas registros ni vuelvas a narrar el contrato completo.' });
               continue;
@@ -285,10 +343,11 @@ export class AgentEngine {
             reply = response.content || 'El modelo no devolvió texto ni llamadas de herramienta.'; break;
           }
           for (const call of response.toolCalls) {
+            const acceptedStage=this.stageAllowed(session,call);
             const result = await this.perform(session, call, traces);
             session.messages.push({ role: 'tool', content: compactToolResult(result), toolCallId: call.id });
             if (session.pending) break;
-            if (call.name === 'contratos_alertas') {
+            if (call.name === 'contratos_alertas' && acceptedStage) {
               const envelope = envelopeSchema.safeParse(result);
               if (!envelope.success || !envelope.data.ok) {
                 reply = 'La herramienta falló al generar alertas: ' + (envelope.success && !envelope.data.ok ? envelope.data.error : 'respuesta inválida') + '. El reporte sigue pendiente.';
@@ -296,6 +355,13 @@ export class AgentEngine {
                 const report = alertReportSchema.safeParse(envelope.data.data);
                 reply = report.success ? report.data.reporte + '\n\nArchivo: ' + report.data.ruta + '\n\nReporte generado. Esto no certifica que todo el buzón esté procesado; puede haber mensajes pendientes.'
                   : 'La herramienta devolvió un reporte de alertas incompleto o inválido. No se presenta un resumen; revise la traza y vuelva a solicitarlo.';
+              }
+              if(session.batchActive&&session.batch){
+                session.batch.reportAttempted=true;
+                session.batch.reportGenerated=envelope.success&&envelope.data.ok&&alertReportSchema.safeParse(envelope.data.data).success;
+                if(!session.batch.reportGenerated)session.batch.errors.push('Reporte de alertas no generado correctamente');
+                refreshBatch(session.batch);
+                reply+='\n\n'+batchSummary(session.batch);
               }
               break;
             }
@@ -309,9 +375,19 @@ export class AgentEngine {
       reply = error instanceof Error && error.message === 'timeout' ? 'El modelo tardó demasiado. La sesión se conserva; puede intentar otra vez.'
         : error instanceof Error && error.message === 'budget' ? 'Se alcanzó el presupuesto de esta sesión. Revise los resultados obtenidos.'
         : 'No se pudo completar el turno del modelo o herramienta. La sesión se conserva; revise la configuración local y vuelva a intentar.';
-    } finally { session.busy = false; }
-    session.messages.push({ role: 'assistant', content: reply }); session.history.push({ role: 'assistant', content: reply, toolCalls: traces });
-    return { sessionId: session.id, reply, toolCalls: traces, needsConfirmation: Boolean(session.pending), pending: this.publicPending(session) };
+    } finally {
+      session.busy=false;
+      if(session.batchActive&&session.batch){
+        session.batch.paused=!session.pending;
+        refreshBatch(session.batch);
+        const previousSummary=reply.indexOf('Estado del lote:');
+        if(previousSummary>=0)reply=reply.slice(0,previousSummary).trimEnd();
+        reply+='\n\n'+batchSummary(session.batch);
+      }
+      session.batchActive=false;
+    }
+    session.messages.push({ role: 'assistant', content: reply }); session.history.push({ role: 'assistant', content: reply, toolCalls: traces, batch: publicBatch(session.batch) });
+    return { sessionId: session.id, reply, toolCalls: traces, needsConfirmation: Boolean(session.pending), pending: this.publicPending(session), batch: publicBatch(session.batch) };
   }
 }
 

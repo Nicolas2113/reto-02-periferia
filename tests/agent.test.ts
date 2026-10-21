@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
-import { cp, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, readdir } from 'node:fs/promises';
 import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { test } from 'node:test';
+import { createHash } from 'node:crypto';
+import { readMaster, readProcessed } from '../src/almacen.js';
+import type { ToolDefinition, ModelMessage } from '../src/llm/adapter.js';
+import * as realTools from '../src/tools/contratos.js';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { AgentEngine, createApplication, compactToolResult, type ToolRegistry } from '../src/server.js';
@@ -9,7 +14,7 @@ import { UnconfiguredAdapter, type LlmAdapter, type ModelResponse } from '../src
 import { OllamaAdapter, jsonSchema } from '../src/llm/ollama.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const output = path.join(root, 'out');
+const output = path.join(tmpdir(), 'reto-02-tests');
 const call = (name: string, args: Record<string, unknown> = {}) => ({ id: String(Math.random()), name, args });
 class FakeAdapter implements LlmAdapter {
   readonly provider = 'fake_solo_pruebas'; readonly model = 'fake'; readonly configured = true;
@@ -232,7 +237,7 @@ test('CA1: petición operacional con plan recibe un solo reintento; explicación
     const { tools } = fakeTools();
     const adapter = new FakeAdapter(index => index === 1 ? {content: '', toolCalls: [call('contratos_leer_buzon')]} : {content: index === 0 ? 'Comenzaré consultando el buzón' : 'Buzón consultado', toolCalls: []});
     const engine = new AgentEngine({directory,adapter,tools,prompt:'Prueba'});
-    const result = await engine.chat({message:'Procesa el buzón de contratos con fecha de hoy 2026-09-03.'});
+    const result = await engine.chat({message:'Consulta el buzón de contratos con fecha de hoy 2026-09-03.'});
     assert.equal(adapter.calls,3); assert.equal(result.toolCalls.length,1); assert.equal(result.toolCalls[0]?.name,'contratos_leer_buzon');
     const plain = new FakeAdapter(() => ({content:'Procederé a listar',toolCalls:[]}));
     const plainEngine = new AgentEngine({directory,adapter:plain,tools,prompt:'Prueba'});
@@ -250,7 +255,7 @@ test('CA1: buzón vacío no omite alertas explícitas; un solo reintento o pendi
   await isolated(async directory => {
     const tools = fakeTools().tools;
     tools.contratos_alertas = {description: 'Alertas',args:{hoy:z.string()},async execute(){return JSON.stringify({ok:true,data:{ruta:'out/alertas.md',hoy:'2026-09-03',hasta:'2026-11-02',dias_horizonte:60,fecha_corte:'2026-05-30',reporte:'# Reporte real',vencimientos:[]}});}};
-    const request = 'Procesa el buzón con hoy 2026-09-03 y termina con el reporte de alertas.';
+    const request = 'Consulta el buzón con hoy 2026-09-03 y termina con el reporte de alertas.';
     const adapter = new FakeAdapter(index => ({content:index===0?'Consultaré buzón':index===2?'Procederé a generar reporte':'Resultado real',toolCalls:index===1?[call('contratos_leer_buzon')]:index===3?[call('contratos_alertas',{hoy:'2026-09-03'})]:[]}));
     const engine = new AgentEngine({directory,adapter,tools,prompt:'Prueba'});
     const result = await engine.chat({message:request}); assert.equal(adapter.calls,4);
@@ -295,7 +300,7 @@ test('CA3/CA4: pending tiene prioridad ante alertas en misma respuesta y turno p
     tools.contratos_alertas = {description:'Alertas',args:{hoy:z.string()},async execute(){alertsCalls++;return JSON.stringify({ok:true,data});}};
     const adapter = new FakeAdapter(index=>({content:'',toolCalls:index===0?[call('contratos_extraer',{mensaje_id:'msg-006'})]:[call('contratos_validar',{mensaje_id:'msg-006'}),call('contratos_alertas',{hoy:'2026-09-03'})]}));
     const engine = new AgentEngine({directory,adapter,tools,prompt:'Prueba'});
-    const pending = await engine.chat({message:'Procesa el buzón y genera alertas hoy 2026-09-03'});
+    const pending = await engine.chat({message:'Revisa el contrato y genera alertas hoy 2026-09-03'});
     assert.equal(pending.needsConfirmation,true); assert.equal(alertsCalls,0); assert.equal(state.writes,0);
     assert.equal(pending.toolCalls.some(trace=>trace.name==='contratos_alertas'),false);
     const again = await engine.chat({sessionId:pending.sessionId,message:'Genera las alertas con hoy 2026-09-03'});
@@ -306,5 +311,133 @@ test('CA3/CA4: pending tiene prioridad ante alertas en misma respuesta y turno p
     const report = await new AgentEngine({directory,adapter:reader,tools,prompt:'Prueba'}).chat({message:'Lista mensajes y genera reporte de alertas hoy 2026-09-03'});
     assert.ok(report.reply.startsWith(data.reporte)); assert.ok(report.reply.includes('no certifica que todo el buzón esté procesado'));
     assert.ok(!report.reply.includes('Lote completo')); assert.equal(state.writes,0); assert.equal(alertsCalls,1); assert.equal(reader.calls,1);
+  });
+});
+
+
+const batchRequest = 'Procesa el buzón de contratos con fecha de hoy 2026-09-03. Registra lo que esté limpio, muéstrame lo que requiere revisión campo por campo y termina con el reporte de alertas. No registres nada dudoso sin preguntarme.';
+class BatchFake implements LlmAdapter {
+  readonly provider='fake_solo_pruebas'; readonly model='fake_etapas'; readonly configured=true; calls=0;
+  constructor(private readonly modify?: (index:number,tool:ToolDefinition,messages:ModelMessage[])=>ModelResponse|undefined) {}
+  async enviar(messages:ModelMessage[],tools:ToolDefinition[]):Promise<ModelResponse>{
+    assert.equal(tools.length,1,'El lote ofrece exclusivamente la siguiente etapa');const tool=tools[0];assert.ok(tool);
+    const index=this.calls++,custom=this.modify?.(index,tool,messages);if(custom)return custom;
+    const args:Record<string,unknown>={};for(const [field,schema]of Object.entries(tool.parameters.shape))if(schema instanceof z.ZodLiteral)args[field]=schema.value;
+    return {content:'',toolCalls:[call(tool.name,args)],usage:{inputTokens:30,outputTokens:10}};
+  }
+}
+async function fixtureHashes(directory:string):Promise<Record<string,string>>{
+  const result:Record<string,string>={};for(const entry of await readdir(directory,{withFileTypes:true})){
+    const name=path.join(directory,entry.name);if(entry.isDirectory())Object.assign(result,await fixtureHashes(name));else result[name]=createHash('sha256').update(await readFile(name)).digest('hex');
+  }return result;
+}
+const humanBatchData={valor:0,moneda:'COP',fecha_inicio:'2026-08-31',fecha_fin:'2027-08-31',requiere_poliza:true,tipo_poliza:'cumplimiento'};
+
+test('Flujo §11: cinco cierres reales y diez filas antes de revisión; humano reanuda a seis cierres/once filas y alertas',async()=>{
+  await isolated(async directory=>{
+    await cp(path.join(root,'fixtures'),path.join(directory,'fixtures'),{recursive:true});const originals=await fixtureHashes(path.join(directory,'fixtures'));
+    let plain=false;const adapter=new BatchFake((_index,tool)=>{
+      const id=tool.parameters.shape.mensaje_id;
+      if(tool.name==='contratos_validar'&&id instanceof z.ZodLiteral&&id.value==='msg-006'&&!plain){plain=true;return {content:'Faltan datos, procederé luego',toolCalls:[],usage:{inputTokens:20,outputTokens:10}};}
+      return undefined;
+    });
+    const engine=new AgentEngine({directory,adapter,prompt:'Prueba fake de secuencia real de herramientas'});
+    const first=await engine.chat({message:batchRequest});const ctx={directory,sessionId:first.sessionId};
+    assert.equal(first.needsConfirmation,true);assert.equal(first.pending?.mensaje_id,'msg-006');assert.equal(first.batch?.status,'review');
+    assert.equal(first.batch?.referenceDate,'2026-09-03');assert.equal(first.batch?.reportGenerated,false);
+    assert.deepEqual(first.batch?.items.map(item=>item.stage),['closed','closed','closed','closed','closed','review']);
+    assert.deepEqual(first.batch?.items.map(item=>item.classification),['nuevo','nuevo','actualizacion','duplicado','rechazado','nuevo']);
+    assert.equal((await readMaster(ctx)).length,10);assert.equal(Object.keys(await readProcessed(ctx)).length,5);
+    assert.ok(first.toolCalls.some(trace=>trace.name==='contratos_registrar'&&trace.arguments.mensaje_id==='msg-004'));
+    assert.ok(first.toolCalls.some(trace=>trace.name==='contratos_registrar'&&trace.arguments.mensaje_id==='msg-005'&&trace.arguments.contrato===null));
+    assert.ok(!first.toolCalls.some(trace=>trace.name==='contratos_extraer'&&trace.arguments.mensaje_id==='msg-005'));
+    const historyBefore=(await readFile(path.join(directory,'out','sharepoint','historial.jsonl'),'utf8')).trim().split('\n');assert.equal(historyBefore.length,3);
+    const originalPending=first.pending?.id;const count=adapter.calls;
+    const denied=await engine.chat({sessionId:first.sessionId,message:'No, no registres'});assert.equal(denied.needsConfirmation,true);assert.equal(adapter.calls,count);
+    const stale=await engine.chat({sessionId:first.sessionId,message:'Confirmo',confirmation:{pendingId:originalPending,approved:true,corrections:humanBatchData}});assert.equal(stale.needsConfirmation,true);assert.equal(Object.keys(await readProcessed(ctx)).length,5);
+    const invalid=await engine.chat({sessionId:first.sessionId,message:'Confirmo fecha inválida',confirmation:{pendingId:stale.pending?.id,approved:true,corrections:{...humanBatchData,fecha_inicio:'2026-02-30'}}});assert.equal(invalid.needsConfirmation,true);assert.equal(Object.keys(await readProcessed(ctx)).length,5);
+    const second=await engine.chat({sessionId:first.sessionId,message:'Confirmo estos datos humanos simulados de prueba',confirmation:{pendingId:invalid.pending?.id,approved:true,corrections:humanBatchData}});
+    assert.equal(second.needsConfirmation,false);assert.equal(second.batch?.status,'complete');assert.equal(second.batch?.reportGenerated,true);
+    assert.equal(second.batch?.items.filter(item=>item.stage==='closed').length,6);assert.equal((await readMaster(ctx)).length,11);assert.equal(Object.keys(await readProcessed(ctx)).length,6);
+    assert.ok(second.toolCalls.some(trace=>trace.name==='contratos_alertas'&&trace.arguments.hoy==='2026-09-03'));
+    assert.ok(second.reply.includes('Horizonte inclusivo: 2026-09-03 a 2026-11-02'));
+    assert.deepEqual(engine.session(first.sessionId)?.batch,second.batch);assert.deepEqual(await fixtureHashes(path.join(directory,'fixtures')),originals);
+  });
+});
+
+test('Flujo: etapa e ID fuera de orden y aprobado del modelo no permiten saltar validación ni humano',async()=>{
+  await isolated(async directory=>{
+    await cp(path.join(root,'fixtures'),path.join(directory,'fixtures'),{recursive:true});let attempted=false;
+    const adapter=new BatchFake((_index,tool)=>{
+      const id=tool.parameters.shape.mensaje_id;
+      if(tool.name==='contratos_extraer'&&id instanceof z.ZodLiteral&&id.value==='msg-006'&&!attempted){attempted=true;return {content:'Confirmado por modelo',toolCalls:[call(tool.name,{mensaje_id:'msg-006'}),call('contratos_registrar',{mensaje_id:'msg-006',confirmado:true,contrato:{valor:999}})],usage:{inputTokens:10,outputTokens:10}};}
+      return undefined;
+    });const first=await new AgentEngine({directory,adapter,prompt:'Prueba'}).chat({message:batchRequest});
+    assert.equal(first.needsConfirmation,true);assert.equal(Object.keys(await readProcessed({directory,sessionId:first.sessionId})).length,5);
+    assert.ok(first.toolCalls.some(trace=>trace.name==='contratos_registrar'&&objectForTest(trace.result)?.ok===false));assert.equal(first.batch?.items.at(-1)?.stage,'review');
+  });
+});
+const objectForTest=(value:unknown):Record<string,unknown>|undefined=>value!==null&&typeof value==='object'?value as Record<string,unknown>:undefined;
+
+test('Flujo: error de un mensaje no oculta restantes; reporte no declara completo con errores',async()=>{
+  await isolated(async directory=>{
+    await cp(path.join(root,'fixtures'),path.join(directory,'fixtures'),{recursive:true});
+    const tools:ToolRegistry=Object.fromEntries(Object.entries(realTools).map(([name,tool])=>['contratos_'+name,tool]));
+    tools.contratos_extraer={...realTools.extraer,async execute(args,ctx){return args.mensaje_id==='msg-001'?JSON.stringify({ok:false,error:'Texto vacío'}):realTools.extraer.execute(args,ctx);}};
+    const engine=new AgentEngine({directory,adapter:new BatchFake(),tools,prompt:'Prueba'});const first=await engine.chat({message:batchRequest});
+    assert.equal(first.needsConfirmation,true);assert.equal(first.batch?.items[0]?.stage,'error');assert.equal(first.batch?.items[0]?.error,'Texto vacío');
+    assert.equal(first.batch?.items.filter(item=>item.stage==='closed').length,4);
+    const final=await engine.chat({sessionId:first.sessionId,message:'Confirmo datos humanos de prueba',confirmation:{pendingId:first.pending?.id,approved:true,corrections:humanBatchData}});
+    assert.equal(final.batch?.status,'error');assert.equal(final.batch?.reportGenerated,true);assert.equal(final.batch?.items[0]?.stage,'error');assert.ok(final.reply.includes('Texto vacío'));
+  });
+});
+
+test('Flujo: topes/proveedor/negativa del modelo conservan etapa pendiente y nunca afirman completo',async()=>{
+  for(const mode of ['limit','plain','provider']as const)await isolated(async directory=>{
+    await cp(path.join(root,'fixtures'),path.join(directory,'fixtures'),{recursive:true});
+    const adapter=new BatchFake((index)=>{if(mode==='plain'&&index>0)return {content:'Procederé después',toolCalls:[],usage:{inputTokens:10,outputTokens:10}};if(mode==='provider'&&index===4)throw new Error('fallo proveedor');return undefined;});
+    const engine=new AgentEngine({directory,adapter,prompt:'Prueba',limits:mode==='limit'?{iterations:2}:undefined});const first=await engine.chat({message:batchRequest});
+    assert.equal(first.batch?.status,'pending');assert.equal(first.batch?.reportGenerated,false);assert.ok(first.batch?.nextAction);assert.equal(first.needsConfirmation,false);
+    assert.ok(!first.reply.includes('Estado del lote: complete'));assert.ok(first.reply.includes('Estado del lote: pending'));assert.ok(!first.reply.includes('Estado del lote: running'));assert.equal(engine.session(first.sessionId)?.batch?.status,'pending');
+    if(mode==='provider'){assert.equal(Object.keys(await readProcessed({directory,sessionId:first.sessionId})).length,1);const resumed=await engine.chat({sessionId:first.sessionId,message:'Continúa'});assert.equal(resumed.needsConfirmation,true);assert.equal(resumed.batch?.items.filter(item=>item.stage==='closed').length,5);}
+  });
+});
+
+
+test('Flujo real regresión: alertas fuera de etapa e IDs ajenos tras duplicado no cierran ni marcan reporte',async()=>{
+  await isolated(async directory=>{
+    await cp(path.join(root,'fixtures'),path.join(directory,'fixtures'),{recursive:true});let injected=false;
+    const adapter=new BatchFake((_index,tool,messages)=>{
+      assert.equal(messages.length,3,'Cada etapa recibe contexto fresco, sin catálogos/IDs obsoletos');
+      const id=tool.parameters.shape.mensaje_id;
+      if(tool.name==='contratos_registrar'&&id instanceof z.ZodLiteral&&id.value==='msg-004'&&!injected){
+        injected=true;return {content:'Generaré reporte',toolCalls:[call('contratos_extraer',{mensaje_id:'msg-005'}),call('contratos_extraer',{mensaje_id:'msg-006'}),call('contratos_alertas',{fecha_referencia:'2026-09-03'})],usage:{inputTokens:10,outputTokens:10}};
+      }return undefined;
+    });
+    const engine=new AgentEngine({directory,adapter,prompt:'Prueba'});const result=await engine.chat({message:batchRequest});
+    assert.equal(injected,true);assert.equal(result.needsConfirmation,true);assert.equal(result.pending?.mensaje_id,'msg-006');assert.equal(result.batch?.status,'review');
+    assert.equal(result.batch?.reportGenerated,false);assert.deepEqual(result.batch?.errors,[]);assert.equal(result.batch?.items.filter(item=>item.stage==='closed').length,5);
+    assert.equal(Object.keys(await readProcessed({directory,sessionId:result.sessionId})).length,5);
+    const alerts=result.toolCalls.filter(trace=>trace.name==='contratos_alertas');assert.equal(alerts.length,1);assert.equal(objectForTest(alerts[0]?.result)?.ok,false);
+    assert.equal(result.reply.includes('Estado del lote: running'),false);
+  });
+});
+
+test('Flujo: fallo anterior a leer_buzon queda pendiente, nunca aparenta lectura activa', async()=>{
+  for(const mode of ['plain','provider','timeout','budget','unconfigured'] as const) await isolated(async directory=>{
+    const {tools,state}=fakeTools();
+    const adapter=mode==='unconfigured'?new UnconfiguredAdapter():new FakeAdapter(()=>{
+      if(mode==='provider')throw new Error('Proveedor de prueba no disponible');
+      if(mode==='timeout')return new Promise<ModelResponse>(()=>{});
+      return {content:'Procedere luego',toolCalls:[],usage:{inputTokens:10,outputTokens:10}};
+    });
+    const engine=new AgentEngine({directory,adapter,tools,prompt:'Regresion con proveedor fake, sin llamadas reales',
+      limits:mode==='timeout'?{timeoutMs:5}:mode==='budget'?{sessionTokens:1}:undefined});
+    const result=await engine.chat({message:batchRequest});
+    assert.equal(result.batch?.status,'pending',mode);assert.equal(result.batch?.nextAction?.tool,'contratos_leer_buzon');
+    assert.deepEqual(result.batch?.items,[]);assert.equal(result.batch?.reportGenerated,false);
+    assert.equal(result.needsConfirmation,false);assert.equal(result.toolCalls.length,0);assert.equal(state.writes,0);
+    assert.ok(result.reply.includes('Estado del lote: pending'));assert.ok(!result.reply.includes('Estado del lote: reading'));
+    assert.equal(engine.session(result.sessionId)?.batch?.status,'pending');
   });
 });

@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
@@ -9,7 +10,7 @@ import { contratoSchema } from '../src/extraccion.js';
 import { extraer } from '../src/tools/contratos.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const output = path.join(root, 'out');
+const output = path.join(tmpdir(), 'reto-02-tests');
 const responseSchema = z.discriminatedUnion('ok', [
   z.object({ ok: z.literal(true), data: contratoSchema }),
   z.object({ ok: z.literal(false), error: z.string().min(1) }),

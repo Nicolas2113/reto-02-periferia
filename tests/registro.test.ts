@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
@@ -25,7 +26,7 @@ async function extract(ctx: Context, id: string): Promise<Contrato | null> {
   return output.ok ? contratoSchema.parse(output.data) : null;
 }
 async function isolated(action: (ctx: Context) => Promise<void>): Promise<void> {
-  const output = path.join(root, 'out');
+  const output = path.join(tmpdir(), 'reto-02-tests');
   await mkdir(output, { recursive: true });
   const directory = await mkdtemp(path.join(output, 'registro-test-'));
   try {

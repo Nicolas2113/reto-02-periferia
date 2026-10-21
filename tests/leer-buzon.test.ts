@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
@@ -8,7 +9,7 @@ import { z } from 'zod';
 import { leer_buzon } from '../src/tools/contratos.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const output = path.join(root, 'out');
+const output = path.join(tmpdir(), 'reto-02-tests');
 const responseSchema = z.discriminatedUnion('ok', [
   z.object({ ok: z.literal(true), data: z.object({
     mensajes: z.array(z.object({
@@ -32,7 +33,7 @@ async function hashes(directory: string): Promise<Record<string, string>> {
 }
 
 async function isolated(action: (directory: string) => Promise<void>): Promise<void> {
-  // Datos de prueba aislados dentro del out/ del proyecto, sin tocar los fixtures originales.
+  // Datos de prueba aislados en el directorio temporal del sistema, sin tocar los fixtures originales.
   await mkdir(output, { recursive: true });
   const directory = await mkdtemp(path.join(output, 'leer-buzon-test-'));
   try {
